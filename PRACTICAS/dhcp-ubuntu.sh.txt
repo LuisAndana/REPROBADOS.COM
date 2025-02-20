@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# Script para instalar y configurar servidor DHCP en Linux
+echo "Iniciando configuración del servidor DHCP..."
+
+# Verificar si isc-dhcp-server está instalado
+dpkg -l | grep isc-dhcp-server > /dev/null
+if [ $? -ne 0 ]; then
+    echo "Instalando servidor DHCP..."
+    sudo apt update && sudo apt install -y isc-dhcp-server
+else
+    echo "El servidor DHCP ya está instalado."
+fi
+
+# Solicitar configuración al usuario
+echo "Configurando DHCP..."
+read -p "Introduce la interfaz de red: " INTERFAZ
+read -p "Introduce la dirección IP estática (Ejemplo: x.x.x.10): " IP_ESTATICA
+read -p "Introduce la máscara de subred (Ejemplo: x.x.x.0): " MASCARA
+read -p "Introduce la puerta de enlace (Ejemplo: x.x.x.1): " GATEWAY
+read -p "Introduce la dirección del DNS (Ejemplo: x.x.x.8): " DNS
+read -p "Introduce la IP de inicio del rango DHCP (Ejemplo: x.x.x.41): " DHCPStartRange
+read -p "Introduce la IP final del rango DHCP (Ejemplo: x.x.x.50): " DHCPEndRange
+read -p "Introduce la duración del arrendamiento en segundos: " LEASE_MIN
+read -p "Introduce el Scope ID (Ejemplo: x.x.x.0): " ScopeID
+
+# Convertir máscara de subred a prefijo
+IFS=. read -r i1 i2 i3 i4 <<< "$MASCARA"
+PREFIX_LENGTH=$(( $(echo "obase=2; $i1" | bc | grep -o 1 | wc -l) + $(echo "obase=2; $i2" | bc | grep -o 1 | wc -l) + $(echo "obase=2; $i3" | bc | grep -o 1 | wc -l) + $(echo "obase=2; $i4" | bc | grep -o 1 | wc -l) ))
+
+# Activar la interfaz si está en estado DOWN
+sudo ip link set $INTERFAZ up
+
+# Configurar IP estática en la interfaz
+CONFIG_FILE="/etc/netplan/01-netcfg.yaml"
+cat <<EOF | sudo tee $CONFIG_FILE
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    $INTERFAZ:
+      dhcp4: no
+      addresses: [$IP_ESTATICA/$PREFIX_LENGTH]
+      gateway4: $GATEWAY
+      nameservers:
+        addresses: [$DNS]
+EOF
+
+# Aplicar cambios de red
+sudo netplan apply
+
+# Configurar archivo /etc/dhcp/dhcpd.conf
+cat <<EOF | sudo tee /etc/dhcp/dhcpd.conf
+subnet $ScopeID netmask $MASCARA {
+    range $DHCPStartRange $DHCPEndRange;
+    option routers $GATEWAY;
+    option domain-name-servers $DNS;
+    default-lease-time $LEASE_MIN;
+    max-lease-time $(($LEASE_MIN * 2));
+}
+EOF
+
+# Configurar interfaz de red para DHCP
+echo "INTERFACESv4=\"$INTERFAZ\"" | sudo tee /etc/default/isc-dhcp-server
+
+# Reiniciar servicio DHCP
+sudo systemctl restart isc-dhcp-server
+
+# Verificar si el servicio se inició correctamente
+if systemctl is-active --quiet isc-dhcp-server; then
+    echo "El servidor DHCP está funcionando correctamente."
+else
+    echo "Error: El servicio DHCP no se inició. Verifica la configuración."
+    sudo journalctl -xe | tail -n 20
+fi
+
+# Habilitar el servicio DHCP en arranque
+sudo systemctl enable isc-dhcp-server
+
+# Mostrar estado final
+echo "Estado del servidor DHCP:"
+sudo systemctl status isc-dhcp-server --no-pager
+
+
