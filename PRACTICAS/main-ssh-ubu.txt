@@ -1,0 +1,17 @@
+source validar_ip.sh
+source dhcp_logic.sh
+
+verificar_instalacion
+solicitar_configuracion
+
+if validar_ip "$IP_ESTATICA" && validar_ip "$GATEWAY" && validar_ip "$DNS"; then
+    convertir_mascara_a_prefijo
+    configurar_interfaz_red
+    configurar_dhcpd_conf
+    configurar_dhcp_interfaz
+    reiniciar_verificar_dhcp
+else
+    echo "Error en la validación de IPs, por favor verifica los datos ingresado>
+fi
+
+

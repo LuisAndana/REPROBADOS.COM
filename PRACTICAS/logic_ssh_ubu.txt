@@ -1,0 +1,41 @@
+# Archivo: dhcp_logic.sh
+
+verificar_instalacion() {
+    dpkg -l | grep isc-dhcp-server > /dev/null
+    if [ $? -ne 0 ]; then
+        echo "Instalando servidor DHCP..."
+        sudo apt update && sudo apt install -y isc-dhcp-server
+    else
+        echo "El servidor DHCP ya está instalado."
+    fi
+}
+
+solicitar_configuracion() {
+    echo "\n--- Configuración del Servidor DHCP ---\n"
+    read -p "Interfaz de red: " INTERFAZ
+    read -p "Dirección IP estática (Ej: x.x.x.10): " IP_ESTATICA
+    read -p "Máscara de subred (Ej: x.x.x.0): " MASCARA
+    read -p "Puerta de enlace (Ej: x.x.x.1): " GATEWAY
+    read -p "Dirección del DNS (Ej: x.x.x.8): " DNS
+    read -p "IP de inicio del rango DHCP (Ej: x.x.x.41): " DHCPStartRange
+     read -p "IP final del rango DHCP (Ej: x.x.x.50): " DHCPEndRange
+    read -p "Duración del arrendamiento en segundos: " LEASE_MIN
+    read -p "Scope ID (Ej: x.x.x.0): " ScopeID
+}
+
+convertir_mascara_a_prefijo() {
+    IFS=. read -r i1 i2 i3 i4 <<< "$MASCARA"
+    PREFIX_LENGTH=$(( $(echo "obase=2; $i1" | bc | grep -o 1 | wc -l) + \
+                      $(echo "obase=2; $i2" | bc | grep -o 1 | wc -l) + \
+                      $(echo "obase=2; $i3" | bc | grep -o 1 | wc -l) + \
+                      $(echo "obase=2; $i4" | bc | grep -o 1 | wc -l) ))
+}
+
+configurar_interfaz_red() {
+    echo "\nConfigurando la interfaz de red...\n"
+    sudo ip link set $INTERFAZ up
+    CONFIG_FILE="/etc/netplan/01-netcfg.yaml"
+    cat <<EOF | sudo tee $CONFIG_FILE
+network:
+  version: 2
+
