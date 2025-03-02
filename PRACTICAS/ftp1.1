@@ -11,12 +11,12 @@ for grupo in "reprobados" "recursadores"; do
     fi
 done
 
-# Crear la carpeta general si no existe
+# Crear la carpeta general si no existe y permitir acceso anónimo
 general_dir="/srv/ftp/general"
 if [ ! -d "$general_dir" ]; then
     sudo mkdir -p "$general_dir"
-    sudo chmod 777 "$general_dir"
-    echo "Carpeta general creada con permisos de escritura."
+    sudo chmod 755 "$general_dir"  # Permite lectura para todos, pero escritura solo para el dueño
+    echo "Carpeta general creada con acceso anónimo de solo lectura."
 fi
 
 # Agregar usuarios
@@ -47,7 +47,7 @@ for ((i=1; i<=num_users; i++)); do
     if [ ! -d "$user_dir" ]; then
         sudo mkdir -p "$user_dir"
         sudo chown "$username:$user_group" "$user_dir"
-        sudo chmod 770 "$user_dir"
+        sudo chmod 770 "$user_dir"  # Acceso total solo para el usuario y su grupo
         echo "Carpeta $user_dir creada con permisos asignados."
     fi
 
@@ -56,7 +56,7 @@ for ((i=1; i<=num_users; i++)); do
     if [ ! -d "$group_dir" ]; then
         sudo mkdir -p "$group_dir"
         sudo chown root:"$user_group" "$group_dir"
-        sudo chmod 770 "$group_dir"
+        sudo chmod 770 "$group_dir"  # Solo los del grupo pueden acceder
         echo "Carpeta del grupo $user_group creada con permisos."
     fi
 
@@ -74,6 +74,16 @@ for ((i=1; i<=num_users; i++)); do
     echo "Usuario $username habilitado en vsftpd."
 done
 
+# Configurar permisos de acceso para cada grupo
+sudo setfacl -m g:reprobados:--- /srv/ftp/recursadores  # Bloquea acceso de reprobados a recursadores
+sudo setfacl -m g:recursadores:--- /srv/ftp/reprobados  # Bloquea acceso de recursadores a reprobados
+
+# Permitir acceso anónimo a la carpeta general
+sudo sed -i '/^anonymous_enable=NO/c\anonymous_enable=YES' /etc/vsftpd.conf
+sudo sed -i '/^anon_upload_enable=YES/c\anon_upload_enable=NO' /etc/vsftpd.conf  # Evita subida de archivos
+sudo sed -i '/^anon_mkdir_write_enable=YES/c\anon_mkdir_write_enable=NO' /etc/vsftpd.conf  # Evita crear carpetas
+
 # Reiniciar el servicio FTP
 sudo systemctl restart vsftpd
 echo "Usuarios creados, permisos ajustados y FTP reiniciado."
+
