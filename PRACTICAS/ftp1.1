@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# Solicitar número de usuarios
+read -p "Ingrese el número de usuarios a agregar: " num_users
+
+# Crear los grupos si no existen
+for grupo in "reprobados" "recursadores"; do
+    if ! getent group "$grupo" > /dev/null; then
+        sudo groupadd "$grupo"
+        echo "Grupo $grupo creado."
+    fi
+done
+
+# Crear la carpeta general si no existe
+general_dir="/srv/ftp/general"
+if [ ! -d "$general_dir" ]; then
+    sudo mkdir -p "$general_dir"
+    sudo chmod 777 "$general_dir"
+    echo "Carpeta general creada con permisos de escritura."
+fi
+
+# Agregar usuarios
+for ((i=1; i<=num_users; i++)); do
+    read -p "Ingrese el nombre del usuario $i: " username
+    read -p "Ingrese el grupo (reprobados/recursadores): " user_group
+
+    # Verificar si el grupo existe
+    if ! getent group "$user_group" > /dev/null; then
+        echo "Error: El grupo '$user_group' no existe."
+        exit 1
+    fi
+
+    # Crear usuario si no existe
+    if ! id "$username" > /dev/null 2>&1; then
+        sudo useradd -m -g "$user_group" -s /bin/bash "$username"
+        echo "Usuario $username creado y agregado al grupo $user_group."
+        
+        # Asignar contraseña inicial
+        echo "$username:12345" | sudo chpasswd
+        echo "Contraseña de $username establecida en '12345'."
+    else
+        echo "El usuario $username ya existe."
+    fi
+
+    # Crear la carpeta del usuario
+    user_dir="/srv/ftp/$username"
+    if [ ! -d "$user_dir" ]; then
+        sudo mkdir -p "$user_dir"
+        sudo chown "$username:$user_group" "$user_dir"
+        sudo chmod 770 "$user_dir"
+        echo "Carpeta $user_dir creada con permisos asignados."
+    fi
+
+    # Crear carpeta del grupo si no existe
+    group_dir="/srv/ftp/$user_group"
+    if [ ! -d "$group_dir" ]; then
+        sudo mkdir -p "$group_dir"
+        sudo chown root:"$user_group" "$group_dir"
+        sudo chmod 770 "$group_dir"
+        echo "Carpeta del grupo $user_group creada con permisos."
+    fi
+
+    # Asegurar permisos de acceso
+    sudo usermod -aG "$user_group" "$username"
+    sudo usermod -aG ftp "$username"
+
+    # Verificar y remover usuario de listas de bloqueados
+    for file in /etc/ftpusers /etc/vsftpd/user_list; do
+        if [ -f "$file" ]; then
+            sudo sed -i "/^$username$/d" "$file"
+        fi
+    done
+
+    echo "Usuario $username habilitado en vsftpd."
+done
+
+# Reiniciar el servicio FTP
+sudo systemctl restart vsftpd
+echo "Usuarios creados, permisos ajustados y FTP reiniciado."
