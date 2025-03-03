@@ -1,0 +1,78 @@
+# Variables generales
+$ftpPath = "C:\FTP"
+$puerto = 21
+$defaultPassword = "Luisydaely123"
+
+# Instala las características necesarias
+Install-WindowsFeature Web-Server, Web-Mgmt-Tools, Web-Ftp-Server -IncludeManagementTools
+
+# Crea las carpetas necesarias
+$carpetas = @("general", "reprobados", "recursadores")
+foreach ($carpeta in $carpetas) {
+    $fullPath = "$ftpPath\$carpeta"
+    if (-Not (Test-Path $fullPath)) {
+        New-Item -Path $fullPath -ItemType Directory
+    }
+}
+
+# Crea usuarios y asigna grupos
+$numeroUsuarios = Read-Host "¿Cuántos usuarios deseas crear?"
+for ($i = 1; $i -le $numeroUsuarios; $i++) {
+    $nombre = Read-Host "Ingrese el nombre para el usuario $i"
+    $grupo = Read-Host "Ingrese el grupo para el usuario $nombre (reprobados/recursadores)"
+    
+    if (-Not (Get-LocalUser -Name $nombre -ErrorAction SilentlyContinue)) {
+        New-LocalUser -Name $nombre -Password (ConvertTo-SecureString $defaultPassword -AsPlainText -Force) -FullName $nombre -PasswordNeverExpires -UserMayNotChangePassword
+        Add-LocalGroupMember -Group $grupo -Member $nombre
+        
+        $userFolder = "$ftpPath\$nombre"
+        if (-Not (Test-Path $userFolder)) {
+            New-Item -Path $userFolder -ItemType Directory
+        }
+        icacls "$userFolder" /grant "$nombre:(OI)(CI)F"
+    } else {
+        Write-Host "⚠️ El usuario '$nombre' ya existe. Saltando la creación..."
+    }
+}
+
+# Asigna permisos a las carpetas generales
+$carpetas | ForEach-Object {
+    $fullPath = "$ftpPath\$_"
+    icacls $fullPath /grant "IIS_IUSRS:(OI)(CI)F"
+    icacls $fullPath /grant "Everyone:(OI)(CI)F"
+}
+
+# Configuración del servidor FTP en IIS
+$siteName = "FTP_Sitio"
+if (-Not (Get-Website -Name $siteName -ErrorAction SilentlyContinue)) {
+    New-Website -Name $siteName -PhysicalPath $ftpPath -Port $puerto -BindingInformation ":$puerto:"
+} else {
+    Write-Host "El sitio $siteName ya existe. Continuando..."
+}
+
+# Configura la autenticación FTP
+Set-WebConfigurationProperty -Filter "/system.ftpServer/security/authentication/anonymousAuthentication" -Name enabled -Value true -PSPath IIS:\Sites\$siteName
+Set-WebConfigurationProperty -Filter "/system.ftpServer/security/authentication/basicAuthentication" -Name enabled -Value true -PSPath IIS:\Sites\$siteName
+
+# Configura las reglas de autorización FTP
+$reglas = @(
+    @{users=""; roles="reprobados"; permissions="Read, Write"},
+    @{users=""; roles="recursadores"; permissions="Read, Write"},
+    @{users="*"; roles=""; permissions="Read"}
+)
+foreach ($regla in $reglas) {
+    $filtro = "system.ftpServer/security/authorization/authorizationRules"
+    $valor = @{users=$regla.users; roles=$regla.roles; permissions=$regla.permissions}
+    if (-Not (Get-WebConfiguration -Filter $filtro -ErrorAction SilentlyContinue | Where-Object {
+        $_.users -eq $regla.users -and $_.roles -eq $regla.roles -and $_.permissions -eq $regla.permissions
+    })) {
+        Add-WebConfiguration -Filter $filtro -Value $valor
+    } else {
+        Write-Host "Configuración duplicada encontrada para $regla. Saltando..."
+    }
+}
+
+# Reinicia el servicio IIS
+iisreset
+
+Write-Host "¡Configuración completada con éxito!"
