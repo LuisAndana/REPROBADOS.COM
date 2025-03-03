@@ -15,6 +15,13 @@ foreach ($carpeta in $carpetas) {
     }
 }
 
+# 🔄 Elimina la herencia de permisos y establece permisos explícitos
+foreach ($carpeta in $carpetas) {
+    $fullPath = "$ftpPath\$carpeta"
+    icacls $fullPath /inheritance:r  # Elimina la herencia de permisos
+    icacls $fullPath /remove:g "Everyone"  # Elimina permisos generales
+}
+
 # Crea usuarios y asigna grupos
 $numeroUsuarios = Read-Host "¿Cuántos usuarios deseas crear?"
 for ($i = 1; $i -le $numeroUsuarios; $i++) {
@@ -29,18 +36,25 @@ for ($i = 1; $i -le $numeroUsuarios; $i++) {
         if (-Not (Test-Path $userFolder)) {
             New-Item -Path $userFolder -ItemType Directory
         }
-        icacls "$userFolder" /grant "$nombre:(OI)(CI)F"
+        icacls "$userFolder" /inheritance:r  # Elimina herencia para carpetas personales
+        icacls "$userFolder" /grant "$nombre:(OI)(CI)F"  # Permiso completo para el propietario
     } else {
         Write-Host "⚠️ El usuario '$nombre' ya existe. Saltando la creación..."
     }
 }
 
-# Asigna permisos a las carpetas generales
-$carpetas | ForEach-Object {
-    $fullPath = "$ftpPath\$_"
-    icacls $fullPath /grant "IIS_IUSRS:(OI)(CI)F"
-    icacls $fullPath /grant "Everyone:(OI)(CI)F"
-}
+# 🔄 Permisos específicos para carpetas
+# Permisos para la carpeta "general"
+icacls "$ftpPath\general" /grant "Anonymous Logon:(OI)(CI)R"  # Solo lectura para anonymous
+icacls "$ftpPath\general" /grant "reprobados:(OI)(CI)F"  # Full para reprobados
+icacls "$ftpPath\general" /grant "recursadores:(OI)(CI)F"  # Full para recursadores
+
+# Permisos para las carpetas de grupos
+icacls "$ftpPath\reprobados" /grant "reprobados:(OI)(CI)F"  # Full para reprobados
+icacls "$ftpPath\reprobados" /deny "recursadores:(OI)(CI)F"  # Denegar acceso a recursadores
+
+icacls "$ftpPath\recursadores" /grant "recursadores:(OI)(CI)F"  # Full para recursadores
+icacls "$ftpPath\recursadores" /deny "reprobados:(OI)(CI)F"  # Denegar acceso a reprobados
 
 # Configuración del servidor FTP en IIS
 $siteName = "FTP_Sitio"
@@ -49,6 +63,31 @@ if (-Not (Get-Website -Name $siteName -ErrorAction SilentlyContinue)) {
 } else {
     Write-Host "El sitio $siteName ya existe. Continuando..."
 }
+
+# Configura la autenticación FTP
+Set-WebConfigurationProperty -Filter "/system.ftpServer/security/authentication/anonymousAuthentication" -Name enabled -Value true -PSPath IIS:\Sites\$siteName
+Set-WebConfigurationProperty -Filter "/system.ftpServer/security/authentication/basicAuthentication" -Name enabled -Value true -PSPath IIS:\Sites\$siteName
+
+# Configura las reglas de autorización FTP en IIS
+Clear-WebConfiguration -Filter "system.ftpServer/security/authorization/authorizationRules"
+
+$reglas = @(
+    @{users="Anonymous"; roles=""; permissions="Read"},  # Solo lectura para anonymous
+    @{users=""; roles="reprobados"; permissions="Read, Write"},  # Full para reprobados
+    @{users=""; roles="recursadores"; permissions="Read, Write"},  # Full para recursadores
+    @{users="*"; roles=""; permissions="Read, Write"}  # Full para autenticados
+)
+foreach ($regla in $reglas) {
+    $filtro = "system.ftpServer/security/authorization/authorizationRules"
+    $valor = @{users=$regla.users; roles=$regla.roles; permissions=$regla.permissions}
+    Add-WebConfiguration -Filter $filtro -Value $valor
+}
+
+# Reinicia el servicio IIS
+iisreset
+
+Write-Host "¡Configuración completada con éxito!"
+
 
 # Configura la autenticación FTP
 Set-WebConfigurationProperty -Filter "/system.ftpServer/security/authentication/anonymousAuthentication" -Name enabled -Value true -PSPath IIS:\Sites\$siteName
