@@ -15,7 +15,7 @@ foreach ($carpeta in $carpetas) {
     }
 }
 
-# 🔄 Elimina la herencia de permisos y establece permisos explícitos
+# Elimina la herencia de permisos y establece permisos explícitos
 foreach ($carpeta in $carpetas) {
     $fullPath = "$ftpPath\$carpeta"
     icacls $fullPath /inheritance:r  # Elimina la herencia de permisos
@@ -39,11 +39,11 @@ for ($i = 1; $i -le $numeroUsuarios; $i++) {
         icacls "$userFolder" /inheritance:r  # Elimina herencia para carpetas personales
         icacls "$userFolder" /grant "$nombre:(OI)(CI)F"  # Permiso completo para el propietario
     } else {
-        Write-Host "⚠️ El usuario '$nombre' ya existe. Saltando la creación..."
+        Write-Host " El usuario '$nombre' ya existe. Saltando la creación..."
     }
 }
 
-# 🔄 Permisos específicos para carpetas
+#  Permisos específicos para carpetas
 # Permisos para la carpeta "general"
 icacls "$ftpPath\general" /grant "Anonymous Logon:(OI)(CI)R"  # Solo lectura para anonymous
 icacls "$ftpPath\general" /grant "reprobados:(OI)(CI)F"  # Full para reprobados
