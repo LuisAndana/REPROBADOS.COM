@@ -1,4 +1,45 @@
+###############################################################################
+# Función para validar que el puerto es un entero válido y no está en uso
+###############################################################################
+function Validar-Puerto {
+    param (
+        [string]$mensaje = "Ingrese un puerto (1-65500):"
+    )
+    
+    do {
+        $puertoInput = Read-Host $mensaje
+
+        # Verificar que se haya ingresado un valor numérico
+        if (-not ($puertoInput -match '^\d{1,5}$')) {
+            Write-Output "Error: Debe ingresar un número entero válido."
+            continue
+        }
+
+        $puerto = [int]$puertoInput
+
+        # Verificar que el número esté dentro del rango permitido
+        if ($puerto -lt 1 -or $puerto -gt 65500) {
+            Write-Output "Error: El puerto debe estar entre 1 y 65500."
+            continue
+        }
+
+        # Obtener los puertos TCP activos usando .NET
+        $activePorts = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | ForEach-Object { $_.Port }
+        
+        # Validar si el puerto está en uso
+        if ($activePorts -contains $puerto) {
+            Write-Output "El puerto $puerto ya está en uso. Por favor, elija otro puerto."
+            continue
+        }
+        
+        # Si pasa todas las validaciones, se retorna el puerto
+        return $puerto
+    } while ($true)
+}
+
+###############################################################################
 # Función para instalar IIS
+###############################################################################
 function Instalar-IIS {
     Write-Output "Instalando IIS..."
     Install-WindowsFeature Web-Server -IncludeAllSubFeature
@@ -7,16 +48,12 @@ function Instalar-IIS {
     Write-Output "IIS instalado y configurado."
 }
 
-# Función para configurar IIS con el puerto ingresado y mostrar el contenido en consola
+###############################################################################
+# Función para configurar IIS con el puerto ingresado y mostrar contenido
+###############################################################################
 function Configurar-IIS {
-    $puerto = Read-Host "Ingrese el puerto en el que desea configurar IIS"
+    $puerto = Validar-Puerto -mensaje "Ingrese el puerto en el que desea configurar IIS:"
     
-    # Validar que el puerto sea numérico y esté dentro del rango válido
-    if (-not ($puerto -match '^\d{1,5}$') -or [int]$puerto -lt 1 -or [int]$puerto -gt 65500) {
-        Write-Output "El puerto debe ser un número válido entre 1 y 65500."
-        return
-    }
-
     # Verificar si la configuración de binding ya existe antes de eliminarla
     $existingBinding = Get-WebBinding -Name "Default Web Site" -ErrorAction SilentlyContinue
     if ($existingBinding) {
@@ -41,12 +78,13 @@ function Configurar-IIS {
     }
 }
 
-# Función para obtener versiones de Nginx disponibles
+###############################################################################
+# Funciones para obtener versiones disponibles de Nginx y Apache
+###############################################################################
 function Obtener-Versiones-Nginx {
     return @("nginx-1.24.0.zip", "nginx-1.23.3.zip", "nginx-1.22.1.zip")
 }
 
-# Función para obtener versiones de Apache disponibles
 function Obtener-Versiones-Apache {
     return @(
         "httpd-2.4.63-250207-win64-VS17.zip",
@@ -55,7 +93,9 @@ function Obtener-Versiones-Apache {
     )
 }
 
-# Función para descargar archivos con manejo de redirección
+###############################################################################
+# Función para descargar archivos (curl.exe o Invoke-WebRequest)
+###############################################################################
 function Descargar-Archivo {
     param (
         [string]$url,
@@ -83,6 +123,7 @@ function Descargar-Archivo {
         }
     }
     
+    # Verificar tamaño mínimo del archivo (1MB) para evitar descargas incompletas
     if (!(Test-Path $outputPath) -or (Get-Item $outputPath).length -lt 1000000) {
         Write-Output "Error: El archivo descargado es demasiado pequeño o está corrupto."
         return $false
@@ -90,7 +131,9 @@ function Descargar-Archivo {
     return $true
 }
 
+###############################################################################
 # Función para instalar VC++ Redistributable si falta VCRUNTIME140.dll
+###############################################################################
 function Instalar-VC_Redist {
     # Comprobar si la DLL existe en System32 o SysWOW64
     if ((Test-Path "C:\Windows\System32\VCRUNTIME140.dll") -or (Test-Path "C:\Windows\SysWOW64\VCRUNTIME140.dll")) {
@@ -124,9 +167,38 @@ function Instalar-VC_Redist {
     }
 }
 
-# Función para instalar Nginx con correcciones y mostrar el contenido en consola
+###############################################################################
+# Función para instalar Nginx y mostrar el contenido en consola
+###############################################################################
 function Instalar-Nginx {
     $versiones = Obtener-Versiones-Nginx
+    $installBasePath = "C:\Nginx"
+    
+    # Verificar si ya existe una instalación previa de Nginx
+    if (Test-Path $installBasePath) {
+        $resp = Read-Host "Ya existe una instalación de Nginx en $installBasePath. ¿Desea eliminarla para instalar otra versión? (S/N)"
+        if ($resp -match '^[sS]') {
+            try {
+                # Detener cualquier proceso nginx.exe que pudiera seguir corriendo
+                $nginxProcesses = Get-Process nginx -ErrorAction SilentlyContinue
+                if ($nginxProcesses) {
+                    Write-Output "Deteniendo procesos de Nginx..."
+                    $nginxProcesses | Stop-Process -Force
+                }
+
+                # Eliminar carpeta Nginx
+                Remove-Item -Path $installBasePath -Recurse -Force
+                Write-Output "Instalación anterior de Nginx eliminada."
+            } catch {
+                Write-Output "No se pudo eliminar la instalación previa: $_"
+                return
+            }
+        } else {
+            Write-Output "Cancelando instalación de Nginx."
+            return
+        }
+    }
+    
     Write-Output "Seleccione la versión de Nginx a instalar:"
     for ($i = 0; $i -lt $versiones.Length; $i++) {
         Write-Output "$($i+1). $($versiones[$i])"
@@ -140,7 +212,6 @@ function Instalar-Nginx {
     $nginxVersion = $versiones[$seleccion - 1]
     $urlNginx = "https://nginx.org/download/$nginxVersion"
     $zipPath = "C:\temp_download.zip"
-    $installBasePath = "C:\Nginx"
 
     # Descargar Nginx
     if (-not (Descargar-Archivo -url $urlNginx -outputPath $zipPath)) {
@@ -164,17 +235,22 @@ function Instalar-Nginx {
     Move-Item -Path $nginxExtractedFolder.FullName -Destination $installBasePath -Force
     Write-Output "Nginx se ha movido a: $installBasePath"
 
+    # Limpiar la carpeta temporal
+    Remove-Item -Path "C:\temp_nginx" -Recurse -Force -ErrorAction SilentlyContinue
+
     # Llamar a la función de configuración e inicio
     Configurar-Arrancar-Nginx -nginxPath $installBasePath
 }
 
-# Función para configurar e iniciar Nginx y mostrar el contenido en consola
+###############################################################################
+# Función para configurar e iniciar Nginx y mostrar el contenido
+###############################################################################
 function Configurar-Arrancar-Nginx {
-    param ([string]$nginxPath = "C:\nginx-1.26.3")
+    param ([string]$nginxPath = "C:\Nginx")
 
     $configPath = Join-Path $nginxPath "conf\nginx.conf"
     if (Test-Path $configPath) {
-        $nginxPort = Read-Host "Ingrese el puerto en el que desea ejecutar Nginx (por ejemplo, 8081)"
+        $nginxPort = Validar-Puerto -mensaje "Ingrese el puerto en el que desea ejecutar Nginx (por ejemplo, 8081):"
         (Get-Content $configPath) -replace 'listen\s+80;', "listen $nginxPort;" | Set-Content $configPath
         Write-Output "Configurado Nginx para escuchar en el puerto $nginxPort"
 
@@ -215,9 +291,45 @@ function Configurar-Arrancar-Nginx {
     }
 }
 
+###############################################################################
 # Función para instalar Apache y mostrar el contenido en consola
+###############################################################################
 function Instalar-Apache {
     $versiones = Obtener-Versiones-Apache
+    $apacheInstallPath = "C:\Apache24"
+    
+    # Verificar si ya existe una instalación previa de Apache
+    if (Test-Path $apacheInstallPath) {
+        $resp = Read-Host "Ya existe una instalación de Apache en $apacheInstallPath. ¿Desea eliminarla para instalar otra versión? (S/N)"
+        if ($resp -match '^[sS]') {
+            try {
+                # Detener el servicio si está registrado
+                $serviceName = "Apache24"
+                if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+                    Write-Output "Deteniendo el servicio $serviceName..."
+                    Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+                }
+                
+                # Detener cualquier proceso httpd.exe que pudiera seguir corriendo
+                $httpdProcesses = Get-Process httpd -ErrorAction SilentlyContinue
+                if ($httpdProcesses) {
+                    Write-Output "Matando procesos httpd..."
+                    $httpdProcesses | Stop-Process -Force
+                }
+                
+                # Eliminar carpeta Apache24
+                Remove-Item -Path $apacheInstallPath -Recurse -Force
+                Write-Output "Instalación anterior de Apache eliminada."
+            } catch {
+                Write-Output "No se pudo eliminar la instalación previa: $_"
+                return
+            }
+        } else {
+            Write-Output "Cancelando instalación de Apache."
+            return
+        }
+    }
+    
     Write-Output "Seleccione la versión de Apache a instalar:"
     for ($i = 0; $i -lt $versiones.Length; $i++) {
         Write-Output "$($i+1). $($versiones[$i])"
@@ -231,7 +343,6 @@ function Instalar-Apache {
     $apacheVersion = $versiones[$seleccion - 1]
     $urlApache = "https://www.apachelounge.com/download/VS17/binaries/$apacheVersion"
     $zipPath = "C:\temp_download.zip"
-    $apacheInstallPath = "C:\Apache24"
 
     # Descargar Apache
     if (-not (Descargar-Archivo -url $urlApache -outputPath $zipPath)) {
@@ -266,7 +377,9 @@ function Instalar-Apache {
     Configurar-Arrancar-Apache -apachePath $apacheInstallPath
 }
 
+###############################################################################
 # Función para configurar e iniciar Apache y mostrar el contenido en consola
+###############################################################################
 function Configurar-Arrancar-Apache {
     param (
         [string]$apachePath = "C:\Apache24"
@@ -281,8 +394,7 @@ function Configurar-Arrancar-Apache {
     # Modificar el archivo httpd.conf para que Apache escuche en un puerto distinto a 80
     $configPath = Join-Path $apachePath "conf\httpd.conf"
     if (Test-Path $configPath) {
-        $apachePort = Read-Host "Ingrese el puerto en el que desea ejecutar Apache (por ejemplo, 8080)"
-        if (-not $apachePort) { $apachePort = "8080" }
+        $apachePort = Validar-Puerto -mensaje "Ingrese el puerto en el que desea ejecutar Apache (por ejemplo, 8080):"
         (Get-Content $configPath) -replace '^Listen\s+\d+', "Listen $apachePort" | Set-Content $configPath
         Write-Output "Configurado Apache para escuchar en el puerto $apachePort"
     } else {
@@ -325,7 +437,9 @@ function Configurar-Arrancar-Apache {
     }
 }
 
+###############################################################################
 # Función para configurar reglas de firewall en el rango 1-65500
+###############################################################################
 function Configurar-Firewall {
     Write-Output "Configurando reglas de firewall para permitir puertos del 1 al 65500..."
     
@@ -335,7 +449,9 @@ function Configurar-Firewall {
     Write-Output "Reglas de firewall configuradas exitosamente para los puertos del 1 al 65500."
 }
 
+###############################################################################
 # Menú de selección con bucle do-while
+###############################################################################
 do {
     Write-Output "`nSeleccione el servicio a instalar:"
     Write-Output "1. IIS"
@@ -345,12 +461,27 @@ do {
     $opcion = Read-Host "Ingrese el número de la opción"
     
     switch ($opcion) {
-        "1" { Instalar-IIS; Configurar-IIS; Configurar-Firewall }
-        "2" { Instalar-Nginx; Configurar-Firewall }
-        "3" { Instalar-Apache; Configurar-Firewall }
-        "4" { Write-Output "Saliendo del instalador." }
-        default { Write-Output "Opción inválida. Intente de nuevo." }
+        "1" {
+            Instalar-IIS
+            Configurar-IIS
+            Configurar-Firewall
+        }
+        "2" {
+            Instalar-Nginx
+            Configurar-Firewall
+        }
+        "3" {
+            Instalar-Apache
+            Configurar-Firewall
+        }
+        "4" {
+            Write-Output "Saliendo del instalador."
+        }
+        default {
+            Write-Output "Opción inválida. Intente de nuevo."
+        }
     }
 } while ($opcion -ne "4")
 
+# Al final, por conveniencia, aplicar de nuevo Configurar-Firewall
 Configurar-Firewall
