@@ -7,7 +7,7 @@ function Instalar-IIS {
     Write-Output "IIS instalado y configurado."
 }
 
-# Función para configurar IIS con el puerto ingresado
+# Función para configurar IIS con el puerto ingresado y mostrar el contenido en consola
 function Configurar-IIS {
     $puerto = Read-Host "Ingrese el puerto en el que desea configurar IIS"
     
@@ -29,6 +29,16 @@ function Configurar-IIS {
 
     Write-Output "IIS configurado en el puerto $puerto."
     iisreset
+
+    # Obtener y mostrar el contenido de la página en texto plano
+    Write-Output "Obteniendo el contenido de la página en http://localhost:$puerto ..."
+    try {
+        $response = Invoke-WebRequest -Uri "http://localhost:$puerto" -UseBasicParsing
+        Write-Output "Contenido de la página:"
+        Write-Output $response.Content
+    } catch {
+        Write-Output "No se pudo obtener el contenido de la página: $_"
+    }
 }
 
 # Función para obtener versiones de Nginx disponibles
@@ -114,7 +124,7 @@ function Instalar-VC_Redist {
     }
 }
 
-# Función para instalar Nginx con correcciones
+# Función para instalar Nginx con correcciones y mostrar el contenido en consola
 function Instalar-Nginx {
     $versiones = Obtener-Versiones-Nginx
     Write-Output "Seleccione la versión de Nginx a instalar:"
@@ -158,7 +168,7 @@ function Instalar-Nginx {
     Configurar-Arrancar-Nginx -nginxPath $installBasePath
 }
 
-# Función para configurar e iniciar Nginx después de la instalación
+# Función para configurar e iniciar Nginx y mostrar el contenido en consola
 function Configurar-Arrancar-Nginx {
     param ([string]$nginxPath = "C:\nginx-1.26.3")
 
@@ -168,33 +178,44 @@ function Configurar-Arrancar-Nginx {
         (Get-Content $configPath) -replace 'listen\s+80;', "listen $nginxPort;" | Set-Content $configPath
         Write-Output "Configurado Nginx para escuchar en el puerto $nginxPort"
 
-        # Agregar reglas de firewall
+        # Agregar regla de firewall
         Write-Output "Agregando regla de firewall para permitir conexiones en el puerto $nginxPort..."
         New-NetFirewallRule -DisplayName "Permitir Nginx en el puerto $nginxPort" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $nginxPort -ErrorAction SilentlyContinue
 
-        # 🔹 Aplicar cambios en los logs
+        # Aplicar cambios en los logs
         (Get-Content $configPath) -replace "#error_log  logs/error.log;", "error_log  logs/error.log;" | Set-Content $configPath
         (Get-Content $configPath) -replace "#access_log  logs/access.log  main;", "access_log  logs/access.log;" | Set-Content $configPath
         Write-Output "Configuración de logs aplicada."
     } else {
         Write-Output "Advertencia: No se encontró nginx.conf en $nginxPath\conf"
+        return
     }
 
-    # Verificar si nginx.exe está en la ubicación esperada
+    # Verificar si nginx.exe existe
     $nginxExe = Join-Path $nginxPath "nginx.exe"
     if (-Not (Test-Path $nginxExe)) {
         Write-Output "Error: No se encontró nginx.exe en $nginxPath"
         return
     }
 
-    # Iniciar Nginx con la ruta especificada
+    # Iniciar Nginx
     Write-Output "Iniciando Nginx desde: $nginxExe"
     Start-Process -FilePath $nginxExe -WorkingDirectory $nginxPath -NoNewWindow
     Set-NetFirewallRule -DisplayName "Permitir Nginx*" -Enabled True
     Write-Output "Nginx se está ejecutando correctamente."
+
+    # Obtener y mostrar el contenido de la página en texto plano
+    Write-Output "Obteniendo el contenido de la página en http://localhost:$nginxPort ..."
+    try {
+        $response = Invoke-WebRequest -Uri "http://localhost:$nginxPort" -UseBasicParsing
+        Write-Output "Contenido de la página:"
+        Write-Output $response.Content
+    } catch {
+        Write-Output "No se pudo obtener el contenido de la página: $_"
+    }
 }
 
-# Función para instalar Apache
+# Función para instalar Apache y mostrar el contenido en consola
 function Instalar-Apache {
     $versiones = Obtener-Versiones-Apache
     Write-Output "Seleccione la versión de Apache a instalar:"
@@ -224,7 +245,7 @@ function Instalar-Apache {
         $tempExtractPath = "C:\ApacheTemp"
         try {
             Expand-Archive -Path $zipPath -DestinationPath $tempExtractPath -Force
-            # Si se extrajo una carpeta 'Apache24' se mueven sus contenidos
+            # Si se extrajo una carpeta 'Apache24', mover sus contenidos
             if (Test-Path "$tempExtractPath\Apache24") {
                 Move-Item -Path "$tempExtractPath\Apache24\*" -Destination $apacheInstallPath -Force
             } else {
@@ -245,19 +266,19 @@ function Instalar-Apache {
     Configurar-Arrancar-Apache -apachePath $apacheInstallPath
 }
 
-# Función para configurar e iniciar Apache después de la instalación
+# Función para configurar e iniciar Apache y mostrar el contenido en consola
 function Configurar-Arrancar-Apache {
     param (
         [string]$apachePath = "C:\Apache24"
     )
     
-    # Instalar VC++ Redistributable si falta
+    # Instalar VC++ Redistributable si es necesario
     if (-not (Instalar-VC_Redist)) {
         Write-Output "No se pudo instalar VC++ Redistributable. Abortando la instalación de Apache."
         return
     }
     
-    # Modificar el archivo httpd.conf para que Apache escuche en un puerto diferente al 80
+    # Modificar el archivo httpd.conf para que Apache escuche en un puerto distinto a 80
     $configPath = Join-Path $apachePath "conf\httpd.conf"
     if (Test-Path $configPath) {
         $apachePort = Read-Host "Ingrese el puerto en el que desea ejecutar Apache (por ejemplo, 8080)"
@@ -268,7 +289,7 @@ function Configurar-Arrancar-Apache {
         Write-Output "No se encontró el archivo httpd.conf en $configPath. Asegúrese de que Apache esté instalado correctamente."
     }
     
-    # Buscar httpd.exe de forma recursiva en la ruta de instalación
+    # Registrar Apache como servicio y arrancarlo
     $httpdArchivo = Get-ChildItem -Path $apachePath -Recurse -Filter httpd.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 
     if ($httpdArchivo) {
@@ -280,10 +301,22 @@ function Configurar-Arrancar-Apache {
         Write-Output "Iniciando servicio de Apache..."
         Start-Service -Name $apacheServiceName
 
-        # Verificar si el servicio está corriendo
+        # Esperar unos segundos para que el servicio se inicie
+        Start-Sleep -Seconds 5
+
+        # Verificar el estado del servicio
         $estado = Get-Service -Name $apacheServiceName
         if ($estado.Status -eq "Running") {
             Write-Output "Apache se está ejecutando correctamente."
+            # Intentar obtener el contenido de la página tras iniciar el servicio
+            Write-Output "Obteniendo el contenido de la página en http://localhost:$apachePort ..."
+            try {
+                $response = Invoke-WebRequest -Uri "http://localhost:$apachePort" -UseBasicParsing
+                Write-Output "Contenido de la página:"
+                Write-Output $response.Content
+            } catch {
+                Write-Output "No se pudo obtener el contenido de la página: $_"
+            }
         } else {
             Write-Output "Error: Apache no pudo iniciarse."
         }
@@ -292,7 +325,7 @@ function Configurar-Arrancar-Apache {
     }
 }
 
-# Función para configurar reglas de firewall automáticamente en el rango 1-65500
+# Función para configurar reglas de firewall en el rango 1-65500
 function Configurar-Firewall {
     Write-Output "Configurando reglas de firewall para permitir puertos del 1 al 65500..."
     
@@ -304,7 +337,7 @@ function Configurar-Firewall {
 
 # Menú de selección con bucle do-while
 do {
-    Write-Output "\nSeleccione el servicio a instalar:"
+    Write-Output "`nSeleccione el servicio a instalar:"
     Write-Output "1. IIS"
     Write-Output "2. Nginx"
     Write-Output "3. Apache"
