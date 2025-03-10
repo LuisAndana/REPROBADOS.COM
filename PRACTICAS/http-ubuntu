@@ -1,0 +1,257 @@
+#!/bin/bash
+set -e
+
+############################################
+#             VERIFICACIÓN ROOT           #
+############################################
+if [ "$EUID" -ne 0 ]; then
+  echo "Este script requiere ejecutarse como root. Use sudo."
+  exit 1
+fi
+
+############################################
+#         FUNCIONES DE AYUDA              #
+############################################
+
+# Actualiza la lista de paquetes
+actualizar_sistema() {
+    echo "Actualizando la lista de paquetes..."
+    apt update -y || { echo "Error al actualizar paquetes"; exit 1; }
+}
+
+# Habilita repositorio Universe (para Ubuntu) si no está habilitado
+habilitar_universe() {
+    if ! grep -q "^deb .*\buniverse\b" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+        echo "Habilitando repositorio Universe..."
+        add-apt-repository universe -y
+        apt update -y
+    else
+        echo "Repositorio Universe ya está habilitado."
+    fi
+}
+
+############################################
+#  FUNCIÓN PARA INSTALAR TOMCAT MANUAL    #
+############################################
+instalar_tomcat_manual() {
+    local tomcat_version="$1"
+    local puerto="$2"
+
+    # Se extrae el número mayor para determinar la carpeta (tomcat-7, tomcat-8, etc.)
+    local major_version
+    major_version="$(echo "$tomcat_version" | cut -d '.' -f 1)"
+    local tomcat_folder="tomcat-$major_version"
+
+    # Se usa archive.apache.org para versiones antiguas y nuevas
+    local tomcat_url="https://archive.apache.org/dist/tomcat/${tomcat_folder}/v${tomcat_version}/bin/apache-tomcat-${tomcat_version}.tar.gz"
+    local install_dir="/opt/tomcat${major_version}"
+
+    echo "Descargando Tomcat $tomcat_version desde $tomcat_url"
+    wget -O "/tmp/apache-tomcat-${tomcat_version}.tar.gz" "$tomcat_url"
+
+    echo "Creando directorio $install_dir"
+    mkdir -p "$install_dir"
+    tar xzf "/tmp/apache-tomcat-${tomcat_version}.tar.gz" -C "$install_dir" --strip-components=1
+
+    # Se modifica el puerto en server.xml
+    local server_xml="$install_dir/conf/server.xml"
+    cp "$server_xml" "$server_xml.bak"
+    sed -i -E "s/(<Connector\s+port=\")([0-9]+)(\")/\1$puerto\3/g" "$server_xml"
+
+    echo "Iniciando Tomcat $tomcat_version (instalación manual) en $install_dir..."
+    sh "$install_dir/bin/startup.sh"
+
+    echo "Tomcat $tomcat_version (instalación manual) configurado en el puerto $puerto."
+}
+
+############################################
+#   FUNCIÓN PARA INSTALAR SERVICIO        #
+############################################
+instalar_servicio() {
+    local servicio="$1"
+    local version="$2"
+    local puerto="$3"
+
+    echo "Instalando $servicio (versión $version) en el puerto $puerto..."
+    actualizar_sistema
+
+    case "$servicio" in
+        "Apache")
+            if ! apt install -y apache2; then
+                echo "Error al instalar Apache. Revisa si el paquete está disponible."
+                return 1
+            fi
+            cp /etc/apache2/ports.conf /etc/apache2/ports.conf.bak
+            sed -i -E "s/Listen\s+[0-9]+/Listen $puerto/g" /etc/apache2/ports.conf
+            systemctl restart apache2
+            echo "Apache instalado y configurado correctamente en el puerto $puerto."
+            ;;
+        "Tomcat")
+            apt install -y default-jdk || {
+                echo "No se pudo instalar default-jdk. Revisa tus repositorios."
+                return 1
+            }
+            # Determinamos el paquete apt según la versión elegida
+            local major_version
+            major_version="$(echo "$version" | cut -d '.' -f 1)"
+            local pkg=""
+            case "$major_version" in
+                7) pkg="tomcat7" ;;
+                8) pkg="tomcat8" ;;
+                9) pkg="tomcat9" ;;
+                # Tomcat 10 no suele existir en apt, se instalará manualmente
+                10) pkg="" ;;
+                *) pkg="" ;;
+            esac
+
+            if [ -n "$pkg" ]; then
+                echo "Intentando instalar $pkg desde repositorio..."
+                habilitar_universe
+                if apt install -y "$pkg"; then
+                    echo "Paquete $pkg instalado correctamente."
+                    local server_file="/etc/${pkg}/server.xml"
+                    if [ -f "$server_file" ]; then
+                        cp "$server_file" "$server_file.bak"
+                        sed -i -E "s/(<Connector\s+port=\")([0-9]+)(\")/\1$puerto\3/g" "$server_file"
+                        systemctl restart "$pkg"
+                        echo "Tomcat $version configurado en el puerto $puerto (instalado desde repos)."
+                    else
+                        echo "No se encontró $server_file, no se pudo configurar el puerto."
+                        return 1
+                    fi
+                    return 0
+                else
+                    echo "No se pudo instalar $pkg desde repositorio. Intentando instalación manual..."
+                fi
+            else
+                echo "No hay paquete apt para Tomcat $version. Iremos a instalación manual..."
+            fi
+            instalar_tomcat_manual "$version" "$puerto"
+            ;;
+        "Nginx")
+            if ! apt install -y nginx; then
+                echo "Error al instalar Nginx. Revisa si el paquete está disponible."
+                return 1
+            fi
+            cp /etc/nginx/sites-available/default /etc/nginx/sites-available/default.bak
+            sed -i -E "s/listen\s+[0-9]+\s+default_server;/listen $puerto default_server;/g" /etc/nginx/sites-available/default
+            systemctl restart nginx
+            echo "Nginx instalado y configurado correctamente en el puerto $puerto."
+            ;;
+        *)
+            echo "Servicio no soportado."
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+############################################
+#   CICLO PRINCIPAL DEL SCRIPT            #
+############################################
+while true; do
+    echo "=== Menú Principal ==="
+    echo "1.- Instalar Apache"
+    echo "2.- Instalar Tomcat"
+    echo "3.- Instalar Nginx"
+    echo "4.- Salir"
+    read -p "Ingrese una opción (1-4): " opcion
+
+    case "$opcion" in
+        1) servicio="Apache" ;;
+        2) servicio="Tomcat" ;;
+        3) servicio="Nginx" ;;
+        4) echo "Saliendo del script."; exit 0 ;;
+        *) echo "Opción inválida. Intente de nuevo."; continue ;;
+    esac
+
+    ############################################
+    #   LISTA DE VERSIONES POR SERVICIO         #
+    ############################################
+    apache_versions=("2.4.58" "2.4.1" "2.4.55")
+    tomcat_versions=("7.0.109" "8.5.85" "9.0.80" "10.1.14")
+    nginx_versions=("1.18.0" "1.20.0" "1.24.0" "1.25.3")
+
+    while true; do
+        echo "Versiones disponibles para $servicio:"
+        case "$servicio" in
+            "Apache")
+                for i in "${!apache_versions[@]}"; do
+                    echo "$((i+1)). ${apache_versions[i]}"
+                done
+                read -p "Seleccione una opción de versión: " version_option
+                if [[ $version_option =~ ^[0-9]+$ ]] && (( version_option >= 1 && version_option <= ${#apache_versions[@]} )); then
+                    version="${apache_versions[$((version_option-1))]}"
+                    break
+                else
+                    echo "Opción inválida. Intente de nuevo."
+                fi
+                ;;
+            "Tomcat")
+                for i in "${!tomcat_versions[@]}"; do
+                    echo "$((i+1)). ${tomcat_versions[i]}"
+                done
+                read -p "Seleccione una opción de versión: " version_option
+                if [[ $version_option =~ ^[0-9]+$ ]] && (( version_option >= 1 && version_option <= ${#tomcat_versions[@]} )); then
+                    version="${tomcat_versions[$((version_option-1))]}"
+                    break
+                else
+                    echo "Opción inválida. Intente de nuevo."
+                fi
+                ;;
+            "Nginx")
+                for i in "${!nginx_versions[@]}"; do
+                    echo "$((i+1)). ${nginx_versions[i]}"
+                done
+                read -p "Seleccione una opción de versión: " version_option
+                if [[ $version_option =~ ^[0-9]+$ ]] && (( version_option >= 1 && version_option <= ${#nginx_versions[@]} )); then
+                    version="${nginx_versions[$((version_option-1))]}"
+                    break
+                else
+                    echo "Opción inválida. Intente de nuevo."
+                fi
+                ;;
+        esac
+    done
+
+    ############################################
+    #   BUCLE PARA SOLICITAR PUERTO VÁLIDO     #
+    ############################################
+    while true; do
+        read -p "Ingrese el puerto de configuración (1-65500): " puerto
+        if [[ $puerto =~ ^[0-9]+$ ]] && [ "$puerto" -ge 1 ] && [ "$puerto" -le 65500 ]; then
+            break
+        else
+            echo "Puerto inválido. Debe ser un número entre 1 y 65500. Intente de nuevo."
+        fi
+    done
+
+    ############################################
+    #   INSTALACIÓN Y CONFIGURACIÓN FINAL      #
+    ############################################
+    while true; do
+        if instalar_servicio "$servicio" "$version" "$puerto"; then
+            echo "Instalación completada."
+            echo "Servicio: $servicio"
+            echo "Versión elegida: $version"
+            echo "Puerto configurado: $puerto"
+            break
+        else
+            echo "¿Desea reintentar la instalación? (s/n)"
+            read -r respuesta
+            case "$respuesta" in
+                [Ss]* ) echo "Reintentando...";;
+                [Nn]* ) echo "Saliendo del script."; exit 1;;
+                * )     echo "Respuesta inválida. Saliendo."; exit 1;;
+            esac
+        fi
+    done
+
+    echo "¿Desea realizar otra instalación? (s/n)"
+    read -r continuar
+    case "$continuar" in
+        [Nn]* ) echo "Saliendo del script."; exit 0 ;;
+        [Ss]* ) echo "Reiniciando el menú principal...";;
+        * ) echo "Respuesta inválida. Saliendo."; exit 0 ;;
+    esac
+done
