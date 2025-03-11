@@ -1,11 +1,15 @@
 ###############################################################################
-# Función para validar que el puerto es un entero válido y no está en uso
+# Función para validar que el puerto es un entero válido, no está en uso,
+# y no pertenece a puertos reservados para protocolos conocidos
 ###############################################################################
 function Validar-Puerto {
     param (
         [string]$mensaje = "Ingrese un puerto (1-65500):"
     )
-    
+
+    # Lista de puertos que se consideran reservados (puedes modificarla a tu gusto)
+    $excludedPorts = @(21,22,23,25,53,80,110,135,139,443,445,3306,1433,5432,8080)
+
     do {
         $puertoInput = Read-Host $mensaje
 
@@ -23,15 +27,21 @@ function Validar-Puerto {
             continue
         }
 
+        # Verificar si está en la lista de puertos excluidos
+        if ($excludedPorts -contains $puerto) {
+            Write-Output "Error: El puerto $puerto está reservado para un protocolo. Elija otro."
+            continue
+        }
+
         # Obtener los puertos TCP activos usando .NET
         $activePorts = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | ForEach-Object { $_.Port }
-        
+
         # Validar si el puerto está en uso
         if ($activePorts -contains $puerto) {
             Write-Output "El puerto $puerto ya está en uso. Por favor, elija otro puerto."
             continue
         }
-        
+
         # Si pasa todas las validaciones, se retorna el puerto
         return $puerto
     } while ($true)
