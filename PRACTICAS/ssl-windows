@@ -1,0 +1,831 @@
+# =====================================
+# Variables globales de conexión FTP
+# =====================================
+$global:FTP_SERVER = "192.168.1.64"
+$global:FTP_USER   = "windows"
+$global:FTP_PASS   = "Luisydaely123_"  # Asegúrate de usar una contraseña que cumpla los requisitos
+
+# =====================================
+# Variable global para la raíz FTP (Usamos ftp:// y, si se elige SSL, EnableSsl = $true)
+# =====================================
+$global:FTP_ROOT = "ftp://$global:FTP_SERVER"
+
+# =====================================
+# Variable global para habilitar FTPS (SSL) en la conexión FTP
+# =====================================
+$global:FTPS_Enabled = $false
+
+# =====================================
+# Variables globales para selección de servicio y protocolo web
+# =====================================
+$global:protocolo = ""    # "HTTP" o "HTTPS"
+$global:servicio  = ""    # "Apache" o "Nginx"
+$global:version   = ""    # Nombre del archivo ZIP
+$global:puerto    = ""    # Puerto en el que se escuchará
+
+# =====================================
+# Función para validar el puerto ingresado
+# =====================================
+function Obtener-PuertoValido {
+    param(
+        [string]$mensaje
+    )
+    $puertosRestringidos = @(1,5,7,9,11,13,17,18,19,20,21,22,23,25,29,37,39,42,43,49,50,53,67,68,69,70,79,88,95,101,109,110,115,118,119,123,137,138,139,143,161,162,177,179,194,201,202,204,206,209,220,389,443,445,465,514,515,520,546,547,563,587,591,631,636,853,990,993,995,1194,1337,1701,1723,1813,2049,2082,2083,3074,3306,3389,4489,6667,6881,6969,25565)
+    function Puerto-En-Uso {
+        param ([int]$puerto)
+        $conexiones = Get-NetTCPConnection -LocalPort $puerto -ErrorAction SilentlyContinue
+        return $conexiones -ne $null
+    }
+    do {
+        $puerto = Read-Host $mensaje
+        if ($puerto -match '^\d{1,5}$' -and [int]$puerto -ge 1 -and [int]$puerto -le 65500) {
+            if ($puertosRestringidos -contains [int]$puerto) {
+                Write-Host "El puerto $puerto está restringido o no se recomienda. Elija otro."
+            }
+            elseif (Puerto-En-Uso -puerto $puerto) {
+                Write-Host "El puerto $puerto ya está en uso. Por favor, elija otro."
+            }
+            else {
+                return [int]$puerto
+            }
+        }
+        else {
+            Write-Host "El puerto ingresado no es válido. Debe ser un número entre 1 y 65500. Intente de nuevo."
+        }
+    } while ($true)
+}
+
+# =====================================
+# Función que pregunta si habilitar FTPS (SSL) o no
+# =====================================
+function MenuPrevioSSL {
+    do {
+        Write-Host ""
+        Write-Host "====================================="
+        Write-Host "   CONFIGURACIÓN DE CONEXIÓN FTP     "
+        Write-Host "====================================="
+        Write-Host "1) Habilitar SSL (FTPS)"
+        Write-Host "2) No habilitar SSL (FTP plano)"
+        $opcion = Read-Host "Elija una opción (1 o 2)"
+        switch ($opcion) {
+            "1" {
+                $global:FTP_ROOT = "ftp://$global:FTP_SERVER"
+                $global:FTPS_Enabled = $true
+                Write-Host "Se usará FTPS (SSL)."
+            }
+            "2" {
+                $global:FTP_ROOT = "ftp://$global:FTP_SERVER"
+                $global:FTPS_Enabled = $false
+                Write-Host "Se usará FTP sin cifrado."
+            }
+            default {
+                Write-Host "Opción no válida. Intente de nuevo."
+                $opcion = $null
+            }
+        }
+    } while ($opcion -notin ("1", "2"))
+}
+
+# =====================================
+# Función para seleccionar el protocolo HTTP o HTTPS
+# =====================================
+function seleccionar_protocolo {
+    Write-Host "Seleccione el protocolo a utilizar:"
+    Write-Host "1.- HTTP"
+    Write-Host "2.- HTTPS (con certificado autofirmado)"
+    $opcion = Read-Host "Opción"
+    switch ($opcion) {
+        "1" { $global:protocolo = "HTTP" }
+        "2" { $global:protocolo = "HTTPS" }
+        default {
+            Write-Host "Opción no válida. Intente de nuevo."
+            seleccionar_protocolo
+        }
+    }
+}
+
+# =====================================
+# Función auxiliar para DESCARGAR archivos usando FtpWebRequest
+# =====================================
+function Download-FTPFile {
+    param(
+        [Parameter(Mandatory=$true)] [string]$ftpUri,
+        [Parameter(Mandatory=$true)] [string]$destinoZip
+    )
+    try {
+        $request = [System.Net.FtpWebRequest]::Create($ftpUri)
+        $request.Method = [System.Net.WebRequestMethods+Ftp]::DownloadFile
+        $request.Credentials = New-Object System.Net.NetworkCredential($global:FTP_USER, $global:FTP_PASS)
+        $request.UseBinary = $true
+        $request.UsePassive = $true
+        if ($global:FTPS_Enabled) {
+            $request.EnableSsl = $true
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
+                param($sender, $certificate, $chain, $sslPolicyErrors)
+                return $true
+            }
+        }
+        $response = $request.GetResponse()
+        $responseStream = $response.GetResponseStream()
+        if (Test-Path $destinoZip) { Remove-Item $destinoZip -Force }
+        $fileStream = New-Object System.IO.FileStream($destinoZip, [System.IO.FileMode]::Create)
+        $buffer = New-Object byte[] 4096
+        do {
+            $read = $responseStream.Read($buffer, 0, $buffer.Length)
+            if ($read -gt 0) { $fileStream.Write($buffer, 0, $read) }
+        } while ($read -gt 0)
+        $fileStream.Close()
+        $responseStream.Close()
+        $response.Close()
+        Write-Host "Descarga completada en: $destinoZip"
+        return $true
+    }
+    catch {
+        Write-Host "Error al descargar el archivo: $_"
+        return $false
+    }
+}
+
+# =====================================
+# Función para listar el contenido de un directorio FTP
+# =====================================
+function Get-FTPDirectoryListing {
+    param([string]$ftpUri)
+    try {
+        $request = [System.Net.FtpWebRequest]::Create($ftpUri)
+        $request.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectory
+        $request.Credentials = New-Object System.Net.NetworkCredential($global:FTP_USER, $global:FTP_PASS)
+        $request.UseBinary = $true
+        $request.UsePassive = $true
+        if ($global:FTPS_Enabled) {
+            $request.EnableSsl = $true
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
+                param($sender, $certificate, $chain, $sslPolicyErrors)
+                return $true
+            }
+        }
+        $response = $request.GetResponse()
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $rawListing = $reader.ReadToEnd()
+        $reader.Close()
+        $response.Close()
+        $lines = $rawListing -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        return $lines
+    }
+    catch {
+        Write-Host "Error al listar el directorio: $_"
+        return @()
+    }
+}
+
+# =====================================
+# Función para seleccionar la versión desde FTP (http/windows/Apache o Nginx)
+# =====================================
+function seleccionar_version_ftp {
+    $carpeta_ftp = switch ($global:servicio) {
+        "Apache" { "http/windows/Apache" }
+        "Nginx"  { "http/windows/Nginx" }
+        default {
+            Write-Host "Servicio no válido."
+            return
+        }
+    }
+    $ftpUri = "$global:FTP_ROOT/$carpeta_ftp/"
+    Write-Host "Conectando al servidor FTP en: $ftpUri"
+    $listing = Get-FTPDirectoryListing -ftpUri $ftpUri
+    if ($listing.Count -eq 0) {
+        Write-Host "No se encontraron archivos en $ftpUri."
+        return
+    }
+    $versionesDisponibles = @()
+    foreach ($line in $listing) {
+        if ($line -match "\s") {
+            $parts = $line -split "\s+"
+            $filename = $parts[-1]
+        }
+        else {
+            $filename = $line
+        }
+        if ($filename -match "\.zip$") {
+            $versionesDisponibles += $filename
+        }
+    }
+    if ($versionesDisponibles.Count -eq 0) {
+        Write-Host "No se encontraron versiones disponibles en el servidor FTP para $global:servicio."
+        return
+    }
+    Write-Host "Seleccione la versión disponible:"
+    for ($i = 0; $i -lt $versionesDisponibles.Count; $i++) {
+        Write-Host "$($i+1). $($versionesDisponibles[$i])"
+    }
+    $seleccion = Read-Host "Ingrese el número de la versión deseada"
+    if ($seleccion -match "^\d+$" -and $seleccion -ge 1 -and $seleccion -le $versionesDisponibles.Count) {
+        $global:version = $versionesDisponibles[$seleccion - 1]
+        Write-Host "Versión seleccionada: $global:version"
+    }
+    else {
+        Write-Host "Opción no válida, intente de nuevo."
+        seleccionar_version_ftp
+    }
+}
+
+# =====================================
+# Función para verificar la existencia de un archivo en FTP
+# =====================================
+function Test-FTPFileExists {
+    param([string]$ftpUri)
+    try {
+        $req = [System.Net.FtpWebRequest]::Create($ftpUri)
+        $req.Method = [System.Net.WebRequestMethods+Ftp]::GetFileSize
+        $req.Credentials = New-Object System.Net.NetworkCredential($global:FTP_USER, $global:FTP_PASS)
+        $req.UseBinary = $true
+        $req.UsePassive = $true
+        if ($global:FTPS_Enabled) {
+            $req.EnableSsl = $true
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
+                param($sender, $certificate, $chain, $sslPolicyErrors)
+                return $true
+            }
+        }
+        $response = $req.GetResponse()
+        $response.Close()
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+# =====================================
+# Función para instalar VC++ Redistributable si falta VCRUNTIME140.dll
+# =====================================
+function Instalar-VC_Redist {
+    if ((Test-Path "C:\Windows\System32\VCRUNTIME140.dll") -or (Test-Path "C:\Windows\SysWOW64\VCRUNTIME140.dll")) {
+        Write-Output "VC++ Redistributable ya instalado."
+        return $true
+    }
+    else {
+        Write-Output "VCRUNTIME140.dll no se encontró. Descargando e instalando VC++ Redistributable..."
+        $vcUrl = "https://aka.ms/vs/16/release/vc_redist.x64.exe"
+        $tempDir = "C:\temp"
+        if (!(Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory | Out-Null }
+        $vcInstaller = "$tempDir\vc_redist.x64.exe"
+        try {
+            Invoke-WebRequest -Uri $vcUrl -OutFile $vcInstaller -UseBasicParsing
+            Write-Output "Instalando VC++ Redistributable..."
+            Start-Process -FilePath $vcInstaller -ArgumentList "/install", "/quiet", "/norestart" -NoNewWindow -Wait
+            Start-Sleep -Seconds 10
+            Remove-Item -Path $vcInstaller -Force
+            if ((Test-Path "C:\Windows\System32\VCRUNTIME140.dll") -or (Test-Path "C:\Windows\SysWOW64\VCRUNTIME140.dll")) {
+                Write-Output "VC++ Redistributable instalado correctamente."
+                return $true
+            }
+            else {
+                Write-Output "Error: La instalación de VC++ Redistributable falló."
+                return $false
+            }
+        }
+        catch {
+            Write-Output "Error al descargar o instalar VC++ Redistributable: $_"
+            return $false
+        }
+    }
+}
+
+# =====================================
+# Función para instalar Apache desde FTP
+# =====================================
+function instalar_apache_ftp {
+    if (-not $global:version) {
+        Write-Host "Error: No se ha seleccionado una versión de Apache."
+        return
+    }
+    $ftpUri = "$global:FTP_ROOT/http/windows/Apache/$global:version"
+    $destinoZip = "$env:USERPROFILE\Downloads\$global:version.zip"
+    $extraerdestino = "C:\Apache"
+    Write-Host "Instalando Apache HTTP Server versión $global:version desde FTP..."
+    Write-Host "Descargando desde: $ftpUri"
+    try {
+        $descargado = Download-FTPFile -ftpUri $ftpUri -destinoZip $destinoZip
+        if (-not $descargado) {
+            Write-Host "No se pudo descargar el archivo desde $ftpUri"
+            return
+        }
+        Write-Host "Extrayendo archivos en $extraerdestino..."
+        Expand-Archive -Path $destinoZip -DestinationPath $extraerdestino -Force
+        Remove-Item -Path $destinoZip -Force
+        Write-Host "Instalación de Apache completada."
+        Configurar-Arrancar-Apache -apachePath "$extraerdestino\Apache24"
+    }
+    catch {
+        Write-Host "Error durante la instalación de Apache desde FTP: $_"
+    }
+}
+
+# =====================================
+# Función para configurar y arrancar Apache
+# =====================================
+function Configurar-Arrancar-Apache {
+    param([string]$apachePath = "C:\Apache\Apache24")
+    if (-not (Instalar-VC_Redist)) {
+        Write-Output "No se pudo instalar VC++ Redistributable. Abortando la instalación de Apache."
+        return
+    }
+    $configPath = Join-Path $apachePath "conf\httpd.conf"
+    if (-not (Test-Path $configPath)) {
+        Write-Output "No se encontró el archivo httpd.conf en $configPath. Asegúrese de que Apache esté instalado correctamente."
+        return
+    }
+    $apachePort = Obtener-PuertoValido -mensaje "Ingrese el puerto en el que desea ejecutar Apache (por ejemplo, 8080)"
+    (Get-Content $configPath) -replace '^Listen\s+\d+', "Listen $apachePort" | Set-Content $configPath
+    Write-Output "Configurado Apache para escuchar en el puerto $apachePort"
+    Write-Output "Agregando regla de firewall para permitir conexiones en el puerto $apachePort..."
+    New-NetFirewallRule -DisplayName "Permitir Apache en el puerto $apachePort" `
+                        -Direction Inbound -Action Allow -Protocol TCP -LocalPort $apachePort `
+                        -ErrorAction SilentlyContinue
+    $apacheExe = Join-Path $apachePath "bin\httpd.exe"
+    if (-not (Test-Path $apacheExe)) {
+        Write-Output "Error: No se encontró httpd.exe en $apacheExe"
+        return
+    }
+    # Solicitar protocolo (HTTP o HTTPS)
+    $inputValido = $false
+    while (-not $inputValido) {
+        $protocoloInput = Read-Host "Ingrese el protocolo que desea utilizar (1 para HTTP, 2 para SSL)"
+        if ($protocoloInput -eq "1") {
+            $global:protocolo = "HTTP"
+            $inputValido = $true
+        }
+        elseif ($protocoloInput -eq "2") {
+            $global:protocolo = "HTTPS"
+            $inputValido = $true
+        }
+        else {
+            Write-Host "Valor inválido. Por favor, ingrese 1 para HTTP o 2 para SSL."
+        }
+    }
+    $global:puerto = $apachePort
+    if ($global:protocolo -eq "HTTPS") {
+        Write-Host "Configurando Apache para HTTPS..."
+        $sslDir = Join-Path $apachePath "conf\ssl"
+        if (-not (Test-Path $sslDir)) { New-Item -ItemType Directory -Path $sslDir -Force | Out-Null }
+        $opensslPath = "C:\Apache\Apache24\bin\openssl.exe"
+        if (-Not (Test-Path $opensslPath)) {
+            Write-Host "Error: OpenSSL no está instalado en la ruta esperada: $opensslPath"
+            return
+        }
+        Write-Host "Generando certificado SSL con OpenSSL..."
+        $crtPath = Join-Path $sslDir "server.crt"
+        $keyPath = Join-Path $sslDir "server.key"
+        $opensslCmd = "$opensslPath req -x509 -nodes -days 365 -newkey rsa:2048 -config `"C:\Apache\Apache24\conf\openssl.cnf`" -keyout `"$keyPath`" -out `"$crtPath`" -subj '/C=MX/ST=Sinaloa/L=LosMochis/O=Empresa/OU=IT/CN=localhost'"
+        $result = Invoke-Expression $opensslCmd
+        if (-not (Test-Path $crtPath) -or (Get-Item $crtPath).Length -eq 0) {
+            Write-Host "Error: No se generó el archivo de certificado SSL en $crtPath"
+            return
+        }
+        if (-not (Test-Path $keyPath) -or (Get-Item $keyPath).Length -eq 0) {
+            Write-Host "Error: No se generó la clave privada SSL en $keyPath"
+            return
+        }
+        Write-Host "Certificado generado correctamente en $sslDir"
+    }
+    # Ajustes en httpd.conf
+    $serverRootLine = 'Define SRVROOT "C:/Apache/Apache24"'
+    $serverRootLine2 = 'ServerRoot "${SRVROOT}"'
+    $confContent = Get-Content $configPath
+    if ($confContent -match "Define SRVROOT") {
+        $confContent = $confContent -replace 'Define SRVROOT\s+".*"', $serverRootLine
+    }
+    else {
+        $confContent = $serverRootLine + "`n" + $confContent
+    }
+    if ($confContent -match "ServerRoot") {
+        $confContent = $confContent -replace 'ServerRoot\s+".*"', $serverRootLine2
+    }
+    else {
+        $confContent = $serverRootLine2 + "`n" + $confContent
+    }
+    $confContent = $confContent -replace "#\s*LoadModule ssl_module modules/mod_ssl.so", "LoadModule ssl_module modules/mod_ssl.so"
+    $confContent = $confContent -replace "#\s*LoadModule socache_shmcb_module modules/mod_socache_shmcb.so", "LoadModule socache_shmcb_module modules/mod_socache_shmcb.so"
+    $confContent = $confContent -replace "#\s*LoadModule headers_module modules/mod_headers.so", "LoadModule headers_module modules/mod_headers.so"
+    if ($global:protocolo -eq "HTTPS") {
+        $confContent = $confContent -replace "(?m)^Listen \d+", ""
+        if ($confContent -match "#\s*Include conf/extra/httpd-ssl.conf") {
+            $confContent = $confContent -replace "#\s*Include conf/extra/httpd-ssl.conf", "Include conf/extra/httpd-ssl.conf"
+        }
+        elseif (-not ($confContent -match "Include conf/extra/httpd-ssl.conf")) {
+            Add-Content -Path $configPath -Value "`nInclude conf/extra/httpd-ssl.conf"
+        }
+    }
+    else {
+        $confContent = $confContent -replace "(?m)^Listen \d+", "Listen $global:puerto"
+    }
+    $confContent | Set-Content $configPath
+    Write-Host "Configuración actualizada para escuchar en el puerto $global:puerto"
+    if ($global:protocolo -eq "HTTPS") {
+        $sslConfFile = Join-Path $apachePath "conf\extra\httpd-ssl.conf"
+        if (Test-Path $sslConfFile) {
+            $sslContent = Get-Content $sslConfFile
+            $sslContent = $sslContent -replace "Listen \d+", "Listen $global:puerto"
+            $sslContent = $sslContent -replace "VirtualHost _default_:\d+", "VirtualHost _default_:$global:puerto"
+            $sslContent = $sslContent -replace "SSLCertificateFile .*", "SSLCertificateFile `"$sslDir\server.crt`""
+            $sslContent = $sslContent -replace "SSLCertificateKeyFile .*", "SSLCertificateKeyFile `"$sslDir\server.key`""
+            $sslContent | Set-Content $sslConfFile
+            Write-Host "Configuración SSL actualizada en httpd-ssl.conf"
+        }
+        else {
+            Write-Host "Error: No se encontró el archivo httpd-ssl.conf"
+            return
+        }
+    }
+    # Inicia Apache
+    Write-Output "Iniciando Apache desde: $apacheExe"
+    Start-Process -FilePath $apacheExe -NoNewWindow
+    Write-Output "Apache se está ejecutando correctamente en el puerto $global:puerto con protocolo $global:protocolo."
+
+    # >>> Agregado: Crear index.html en el DocumentRoot <<<
+    $docRoot = "C:\Apache\Apache24\htdocs"
+    if (!(Test-Path $docRoot)) { New-Item -ItemType Directory -Path $docRoot | Out-Null }
+    $indexFile = Join-Path $docRoot "index.html"
+    $contenidoHTML = @"
+<html>
+  <head>
+    <title>Apache Test</title>
+  </head>
+  <body>
+    <h1>si jala el apache PROFE HERMAN</h1>
+  </body>
+</html>
+"@
+    $contenidoHTML | Set-Content -Path $indexFile -Encoding UTF8
+    Write-Host "Archivo index.html creado en $docRoot"
+}
+
+
+# =====================================
+# Función para instalar Nginx desde FTP
+# =====================================
+function instalar_nginx_ftp {
+    if (-not $global:version) {
+        Write-Host "Error: No se ha seleccionado una versión de Nginx."
+        return
+    }
+    $ftpUri = "$global:FTP_ROOT/http/windows/Nginx/$global:version"
+    $destinoZip = "$env:USERPROFILE\Downloads\$global:version.zip"
+    $extraerdestino = "C:\Nginx"
+    Write-Host "Instalando Nginx versión $global:version desde FTP..."
+    Write-Host "Descargando desde: $ftpUri"
+    try {
+        $descargado = Download-FTPFile -ftpUri $ftpUri -destinoZip $destinoZip
+        if (-not $descargado) {
+            Write-Host "No se pudo descargar el archivo desde $ftpUri"
+            return
+        }
+        Write-Host "Extrayendo archivos en $extraerdestino..."
+        Expand-Archive -Path $destinoZip -DestinationPath $extraerdestino -Force
+        Remove-Item -Path $destinoZip -Force
+        Write-Host "Instalación de Nginx completada."
+        Write-Host "Ejecutando configuración y arranque de Nginx..."
+        Configurar-Arrancar-Nginx -nginxPath $extraerdestino
+    }
+    catch {
+        Write-Host "Error durante la instalación de Nginx desde FTP: $_"
+    }
+}
+
+# =====================================
+# Función para configurar y arrancar Nginx
+# =====================================
+function Configurar-Arrancar-Nginx {
+    param([string]$nginxPath = "C:\Nginx")
+    $configPath = Join-Path $nginxPath "conf\nginx.conf"
+    if (-not (Test-Path $configPath)) {
+        Write-Host "Error: No se encontró el archivo nginx.conf en $nginxPath\conf"
+        return
+    }
+    $nginxPort = Obtener-PuertoValido -mensaje "Ingrese el puerto en el que desea ejecutar Nginx (por ejemplo, 8081)"
+    (Get-Content $configPath) -replace 'listen\s+\d+;', "listen $nginxPort;" | Set-Content $configPath
+    Write-Host "Configurado Nginx para escuchar en el puerto $nginxPort"
+    New-NetFirewallRule -DisplayName "Permitir Nginx en el puerto $nginxPort" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $nginxPort -ErrorAction SilentlyContinue
+    $nginxExe = Join-Path $nginxPath "nginx.exe"
+    if (-not (Test-Path $nginxExe)) {
+        Write-Host "Error: No se encontró nginx.exe en $nginxPath"
+        return
+    }
+    Start-Process -FilePath $nginxExe -NoNewWindow
+    Write-Host "Nginx se está ejecutando correctamente en el puerto $nginxPort."
+}
+
+# =====================================
+# Función para instalar OpenSSL (descarga e instalación)
+# =====================================
+function Install-Openssl {
+    $opensslPath = "C:\OpenSSL-Win64\bin"
+    if (Test-Path $opensslPath) {
+        Write-Output "OpenSSL ya está instalado."
+    }
+    else {
+        $Url = "https://slproweb.com/download/Win64OpenSSL-3_4_1.exe"
+        $instalacion = "$env:TEMP\OpenSSL_Installer.exe"
+        Write-Output "Descargando OpenSSL..."
+        Invoke-WebRequest -Uri $Url -OutFile $instalacion
+        Write-Output "Instalando OpenSSL..."
+        Start-Process -FilePath $instalacion -ArgumentList "/silent /verysilent /sp- /suppressmsgboxes /DIR=C:\OpenSSL-Win64" -Wait
+        if (-not ($env:Path -split ';' -contains $opensslPath)) {
+            [Environment]::SetEnvironmentVariable("Path", "$env:Path;$opensslPath", [EnvironmentVariableTarget]::Machine)
+            $env:Path += ";$opensslPath"
+        }
+        Write-Output "Verificando la instalación de OpenSSL..."
+        try {
+            if (-Not (Test-Path "$opensslPath\openssl.exe")) {
+                throw "El archivo OpenSSL.exe no se encontró en $opensslPath. La instalación puede haber fallado."
+            }
+            $opensslVersion = & "$opensslPath\openssl.exe" version 2>&1
+            if ($opensslVersion -match "error|failed|not recognized") {
+                throw "Error al ejecutar OpenSSL: $opensslVersion"
+            }
+            Write-Output "OpenSSL instalado correctamente. Versión: $opensslVersion"
+        }
+        catch {
+            Write-Output "Error al verificar la instalación de OpenSSL: $_"
+        }
+        Remove-Item -Path $instalacion -Force
+    }
+}
+
+# =====================================
+# Función para configurar FTP en IIS (opcional)
+# =====================================
+function Configurar-FTPIIS {
+    Write-Host "Configurando FTP en IIS para permitir conexiones con y sin SSL..."
+    Set-ItemProperty -Path "IIS:\Sites\FTP" -Name ftpServer.security.ssl.controlChannelPolicy -Value "SslAllow"
+    Set-ItemProperty -Path "IIS:\Sites\FTP" -Name ftpServer.security.ssl.dataChannelPolicy -Value "SslAllow"
+    $cert = New-SelfSignedCertificate -Subject "CN=ftplocalhost" -CertStoreLocation Cert:\LocalMachine\My -KeyExportPolicy Exportable -KeySpec Signature -NotAfter (Get-Date).AddYears(1)
+    Set-ItemProperty -Path "IIS:\Sites\FTP" -Name ftpServer.security.ssl.serverCertHash -Value $cert.Thumbprint
+    Restart-WebItem -PSPath "IIS:\Sites\FTP"
+    Write-Host "Configuración de FTP en IIS completada."
+}
+
+# =====================================
+# Función para instalar el servidor FTP (IIS)
+# =====================================
+function instalarFTP {
+    Install-WindowsFeature Web-Server -IncludeAllSubFeature
+    Install-WindowsFeature Web-FTP-Service -IncludeAllSubFeature
+    Install-WindowsFeature Web-FTP-Server -IncludeAllSubFeature
+    Install-WindowsFeature Web-Basic-Auth
+    New-WebFtpSite -Name "FTP" -Port 21 -PhysicalPath C:\FTP -Force
+    Write-Host "Generando certificado SSL auto-firmado..."
+    $cert = New-SelfSignedCertificate -DnsName "localhost" -CertStoreLocation "Cert:\LocalMachine\My"
+    $thumbprint = $cert.Thumbprint
+    Write-Host "Certificado generado con Thumbprint: $thumbprint"
+    Set-ItemProperty "IIS:\Sites\FTP" -Name ftpServer.security.ssl.serverCertHash -Value $thumbprint
+    Set-ItemProperty "IIS:\Sites\FTP" -Name ftpServer.security.ssl.serverCertStoreName -Value "My"
+    Set-WebConfigurationProperty -Filter "/system.applicationHost/sites/site[@name='FTP']/ftpServer/userIsolation" -Name "mode" -Value "None"
+    Set-ItemProperty "IIS:\Sites\FTP" -name ftpServer.security.ssl.controlChannelPolicy -Value "SslAllow"
+    Set-ItemProperty "IIS:\Sites\FTP" -name ftpServer.security.ssl.dataChannelPolicy -Value "SslAllow"
+    if (-not (Test-Path C:\FTP)) { mkdir C:\FTP }
+    if (-not (Test-Path "C:\FTP\General")) { mkdir C:\FTP\General }
+    if (-not (Test-Path "C:\FTP\LocalUser")) {
+        mkdir C:\FTP\LocalUser
+        mkdir C:\FTP\LocalUser\Public
+        New-Item -ItemType SymbolicLink -Path "C:\FTP\LocalUser\Public\General" -Target "C:\FTP\General" -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-Path "C:\FTP\http\windows\Apache")) {
+        New-Item -ItemType Directory -Path "C:\FTP\http\windows\Apache" -Force | Out-Null
+        Write-Host "Carpeta creada: C:\FTP\http\windows\Apache"
+    }
+    if (-not (Test-Path "C:\FTP\http\windows\Nginx")) {
+        New-Item -ItemType Directory -Path "C:\FTP\http\windows\Nginx" -Force | Out-Null
+        Write-Host "Carpeta creada: C:\FTP\http\windows\Nginx"
+    }
+    Write-Host "`nInstalación y configuración básica del FTP completada."
+    Write-Host "Ahora puedes colocar tus archivos ZIP en C:\FTP\http\windows\Apache y Nginx."
+    Write-Host "Luego, al ejecutar la opción 1) o 2) del menú, se listarán esas versiones."
+}
+
+function CrearGrupos {
+    $ADSI = [ADSI]"WinNT://$env:COMPUTERNAME"
+    if (-not ($ADSI.Children | Where-Object { $_.SchemaClassName -eq "Group" -and $_.Name -eq "Reprobados" })) {
+        mkdir C:\FTP\Reprobados
+        $FTPUserGroup = $ADSI.Create("Group", "Reprobados")
+        $FTPUserGroup.Description = "Los miembros de este grupo están Reprobados"
+        $FTPUserGroup.SetInfo()
+    }
+    if (-not ($ADSI.Children | Where-Object { $_.SchemaClassName -eq "Group" -and $_.Name -eq "Recursadores" })) {
+        mkdir C:\FTP\Recursadores
+        $FTPUserGroup = $ADSI.Create("Group", "Recursadores")
+        $FTPUserGroup.Description = "Los miembros de este grupo están Recursando"
+        $FTPUserGroup.SetInfo()
+    }
+}
+
+# Lista global de usuarios creados
+$Global:ListaUsuarios = @()
+
+function CrearUsuario {
+    while ($true) {
+        $nombre = Read-Host "Ingrese el nombre de usuario (o 'salir' para finalizar)"
+        if ($nombre -eq "salir") {
+            Write-Host "Fin de creación de usuarios."
+            return
+        }
+        if ($nombre -match "^[a-zA-Z0-9_]{3,20}$") {
+            if (Get-LocalUser -Name $nombre -ErrorAction SilentlyContinue) {
+                Write-Host "Error: El usuario '$nombre' ya existe." -ForegroundColor Red
+                continue
+            }
+        }
+        else {
+            Write-Host "Error: El nombre de usuario debe tener 3-20 caracteres (letras, números o '_')." -ForegroundColor Red
+            continue
+        }
+        do {
+            $password = Read-Host "Ingrese una contraseña (mínimo 8 caracts., con mayúsculas, minúsculas, dígitos y especiales)"
+            if ($password.Length -ge 8 -and $password -match "[A-Z]" -and $password -match "[a-z]" -and $password -match "[0-9]" -and $password -match "[^a-zA-Z0-9]") {
+                $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+                break
+            }
+            else {
+                Write-Host "Error: La contraseña no cumple los requisitos. Intente de nuevo." -ForegroundColor Red
+            }
+        } while ($true)
+        Write-Host "Seleccione el grupo del usuario:"
+        $opcion = Read-Host "1-Reprobados  2-Recursadores"
+        $grupo = switch ($opcion) {
+            "1" { "Reprobados" }
+            "2" { "Recursadores" }
+            default { "" }
+        }
+        if ($grupo -eq "") {
+            Write-Host "Error: Grupo inválido." -ForegroundColor Red
+            continue
+        }
+        New-LocalUser -Name $nombre -Password $securePass -FullName $nombre -Description "Usuario FTP"
+        Add-LocalGroupMember -Group $grupo -Member $nombre
+        $carpetaUsuario = "C:\FTP\LocalUser\$nombre"
+        if (-not (Test-Path $carpetaUsuario)) {
+            New-Item -Path $carpetaUsuario -ItemType Directory | Out-Null
+            New-Item -Path "$carpetaUsuario\$nombre" -ItemType Directory | Out-Null
+            New-Item -ItemType SymbolicLink -Path "$carpetaUsuario\General" -Target "C:\FTP\General" -ErrorAction SilentlyContinue
+            New-Item -ItemType SymbolicLink -Path "$carpetaUsuario\$grupo" -Target "C:\FTP\$grupo" -ErrorAction SilentlyContinue
+        }
+        $Global:ListaUsuarios += [PSCustomObject]@{ Nombre = $nombre; Grupo = $grupo }
+        Write-Host "Usuario '$nombre' creado exitosamente." -ForegroundColor Green
+    }
+}
+
+function Configurar-FTPAuthorization($userName) {
+    try {
+        Add-WebConfiguration -Filter "/system.ftpServer/security/authorization" `
+            -Value @{accessType="Allow";users="$userName";permissions=3} `
+            -PSPath "IIS:\" -Location "FTP"
+    }
+    catch {
+        Write-Host "Error agregando regla de autorización para ${userName}: $_"
+    }
+}
+
+# =====================================
+# Ajustar permisos para Anonymous, $global:FTP_USER y usuarios creados
+# =====================================
+function Permisos {
+    Write-Host "Habilitando autenticación básica en el FTP..."
+    Set-ItemProperty "IIS:\Sites\FTP" -Name ftpServer.Security.authentication.basicAuthentication.enabled -Value $true
+    Write-Host "Aplicando permisos a IUSR (anonymous)..."
+    icacls "C:\FTP" /remove "IUSR" /T /C | Out-Null 2>$null
+    # Se dará a IUSR permiso completo en la carpeta http (para permitir escribir) y solo lectura en General
+    if (Test-Path "C:\FTP\http") {
+        icacls "C:\FTP\http" /grant "IUSR:(OI)(CI)F" /T /C | Out-Null
+    }
+    if (Test-Path "C:\FTP\General") {
+        icacls "C:\FTP\General" /grant "IUSR:(OI)(CI)R" /T /C | Out-Null
+    }
+    Write-Host "Aplicando permisos a usuarios locales..."
+    # Primero, el usuario global
+    if (Get-LocalUser -Name $global:FTP_USER -ErrorAction SilentlyContinue) {
+        if (Test-Path "C:\FTP\http") {
+            icacls "C:\FTP\http" /grant "$($global:FTP_USER):(OI)(CI)F" /T /C | Out-Null
+        }
+        if (Test-Path "C:\FTP\General") {
+            icacls "C:\FTP\General" /grant "$($global:FTP_USER):(OI)(CI)F" /T /C | Out-Null
+        }
+        Configurar-FTPAuthorization $global:FTP_USER
+    }
+    # Luego, cada usuario creado
+    foreach ($usr in $Global:ListaUsuarios) {
+        $nombre = $usr.Nombre
+        $grupo  = $usr.Grupo
+        if (Test-Path "C:\FTP\http") {
+            icacls "C:\FTP\http" /grant "${nombre}:(OI)(CI)F" /T /C | Out-Null
+        }
+        if (Test-Path "C:\FTP\General") {
+            icacls "C:\FTP\General" /grant "${nombre}:(OI)(CI)F" | Out-Null
+        }
+        $carpetaUsuario = "C:\FTP\LocalUser\$nombre"
+        if (Test-Path $carpetaUsuario) {
+            icacls $carpetaUsuario /grant "${nombre}:(OI)(CI)F" /T /C | Out-Null
+        }
+        $carpetaGrupo = "C:\FTP\$grupo"
+        if (Test-Path $carpetaGrupo) {
+            icacls $carpetaGrupo /grant "${nombre}:(OI)(CI)F" /T /C | Out-Null
+        }
+        Configurar-FTPAuthorization $nombre
+    }
+    Restart-WebItem "IIS:\Sites\FTP"
+    Write-Host "Permisos actualizados correctamente."
+}
+
+# =====================================
+# Función para asegurar que $global:FTP_USER exista y tenga permisos
+# =====================================
+function Asegurar-UsuarioFTPGlobal {
+    if (-not (Get-LocalUser -Name $global:FTP_USER -ErrorAction SilentlyContinue)) {
+        Write-Host "Creando usuario '$($global:FTP_USER)' con pass '$($global:FTP_PASS)'..."
+        $securePass = ConvertTo-SecureString $global:FTP_PASS -AsPlainText -Force
+        New-LocalUser -Name $global:FTP_USER -Password $securePass -FullName $global:FTP_USER -Description "Usuario FTP (global)"
+        $carpetaGlobal = "C:\FTP\LocalUser\$($global:FTP_USER)"
+        if (-not (Test-Path $carpetaGlobal)) {
+            New-Item -ItemType Directory -Path $carpetaGlobal | Out-Null
+            New-Item -ItemType Directory -Path "$carpetaGlobal\$($global:FTP_USER)" | Out-Null
+            New-Item -ItemType SymbolicLink -Path "$carpetaGlobal\General" -Target "C:\FTP\General" -ErrorAction SilentlyContinue
+        }
+    }
+    else {
+        Write-Host "El usuario '$($global:FTP_USER)' ya existe."
+    }
+    icacls "C:\FTP\LocalUser\$($global:FTP_USER)" /grant "$($global:FTP_USER):(OI)(CI)F" /T /C | Out-Null
+    Configurar-FTPAuthorization $global:FTP_USER
+}
+
+# =====================================
+# Función para instalar el servidor FTP (IIS)
+# =====================================
+function InstalarServidorFTP {
+    Write-Host "----------------------------------------"
+    Write-Host "Iniciando instalación del servidor FTP..."
+    Write-Host "----------------------------------------"
+    instalarFTP
+    Write-Host "Creando grupos..."
+    CrearGrupos
+    Write-Host "Creando usuarios (para finalizar, escriba 'salir' al solicitar nombre)..."
+    CrearUsuario
+    Write-Host "Aplicando permisos..."
+    Permisos
+    Write-Host "Asegurando que el usuario global ($global:FTP_USER) también exista y tenga permisos..."
+    Asegurar-UsuarioFTPGlobal
+    Write-Host "Configuración FTP completada."
+}
+
+# =====================================
+# MENÚ PRINCIPAL
+# =====================================
+function Mostrar-MenuPrincipal {
+    do {
+        Write-Host ""
+        Write-Host "====================================="
+        Write-Host "         MENÚ DE INSTALACIÓN         "
+        Write-Host "====================================="
+        Write-Host "1.- Instalar Apache"
+        Write-Host "2.- Instalar Nginx"
+        Write-Host "3.- Salir"
+        Write-Host "4.- Instalar y Configurar FTP (IIS)"
+        $opcion = Read-Host "Seleccione una opción (1, 2, 3 o 4)"
+        switch ($opcion) {
+            "1" {
+                $global:servicio = "Apache"
+                MenuPrevioSSL
+                seleccionar_version_ftp
+                instalar_apache_ftp
+                $global:servicio = $null
+                $global:version  = $null
+                $global:puerto   = $null
+            }
+            "2" {
+                $global:servicio = "Nginx"
+                MenuPrevioSSL
+                seleccionar_version_ftp
+                instalar_nginx_ftp
+                $global:servicio = $null
+                $global:version  = $null
+                $global:puerto   = $null
+            }
+            "4" {
+                InstalarServidorFTP
+            }
+            "3" {
+                Write-Host "Saliendo del menú..."
+                break
+            }
+            default {
+                Write-Host "Opción no válida. Intente de nuevo."
+            }
+        }
+    } while ($opcion -ne "3")
+}
+
+# =====================================
+# Ejecución del menú interactivo
+# =====================================
+Clear-Host
+Mostrar-MenuPrincipal
