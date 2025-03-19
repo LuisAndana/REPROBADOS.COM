@@ -1,0 +1,727 @@
+# =====================================
+# Función común para validar el puerto ingresado
+# =====================================
+function Obtener-PuertoValido {
+    param (
+        [string]$mensaje
+    )
+    # Lista de puertos restringidos
+    $puertosRestringidos = @(1,5,7,9,11,13,17,18,19,20,21,22,23,25,29,37,39,42,43,49,50,53,67,68,69,70,79,88,95,101,109,110,115,118,119,123,137,138,139,143,161,162,177,179,194,201,202,204,206,209,220,389,443,445,465,514,515,520,546,547,563,587,591,631,636,853,990,993,995,1194,1337,1701,1723,1813,2049,2082,2083,3074,3306,3389,4489,6667,6881,6969,25565)
+    
+    function Puerto-En-Uso {
+        param ([int]$puerto)
+        $conexiones = Get-NetTCPConnection -LocalPort $puerto -ErrorAction SilentlyContinue
+        return $conexiones -ne $null
+    }
+
+    do {
+        $puerto = Read-Host $mensaje
+        if ($puerto -match '^\d{1,5}$' -and [int]$puerto -ge 1 -and [int]$puerto -le 65500) {
+            if ($puertosRestringidos -contains [int]$puerto) {
+                Write-Host "El puerto $puerto está restringido. Por favor, elija otro."
+            }
+            elseif (Puerto-En-Uso -puerto $puerto) {
+                Write-Host "El puerto $puerto ya está en uso. Por favor, elija otro."
+            }
+            else {
+                return [int]$puerto
+            }
+        }
+        else {
+            Write-Host "El puerto ingresado no es válido. Debe ser un número entre 1 y 65500. Intente de nuevo."
+        }
+    } while ($true)
+}
+
+function Instalar-IIS {
+    Write-Host "Instalando Web-Server (IIS)..."
+    Install-WindowsFeature Web-Server -IncludeAllSubFeature
+    Install-WindowsFeature Web-Security -IncludeAllSubFeature
+    Import-Module WebAdministration
+    Set-Service -name W3SVC -StartupType Automatic    
+}
+
+function Configurar-IIS {
+    param()
+    
+    do {
+        $respuesta = Read-Host "¿Deseas habilitar SSL? (1 = Sí, 2 = No)"
+        if ($respuesta -eq "1" -or $respuesta -eq "2") {
+            break
+        }
+        else {
+            Write-Host "Opción inválida. Por favor, ingresa 1 para Sí o 2 para No."
+        }
+    } while ($true)
+
+    $opssl = if ($respuesta -eq "1") { 1 } else { 0 }
+    
+    $puerto = Obtener-PuertoValido -mensaje "Ingresa el puerto para la configuración de IIS"
+    
+    Instalar-IIS
+    
+    if ($opssl -eq 1) {
+        Write-Host "Configurando SSL..."
+        $cert = New-SelfSignedCertificate -Subject "CN=localhost" -CertStoreLocation Cert:\LocalMachine\My -KeyExportPolicy Exportable -KeySpec Signature -NotAfter (Get-Date).AddYears(1)
+        $x509 = 'System.Security.Cryptography.X509Certificates.X509Store'
+        $Store = New-Object -TypeName $x509 -ArgumentList 'Root', 'LocalMachine'
+        $Store.Open('ReadWrite')
+        $Store.Add($cert)
+        $Store.Close()
+        
+        New-WebBinding -Name "Default Web Site" -Protocol "https" -Port $puerto -IPAddress "*"
+        $binding = Get-WebBinding -Name "Default Web Site" -Protocol "https" -Port $puerto
+        $binding.AddSslCertificate($cert.Thumbprint, "My")  
+    } else {
+        Write-Host "Configurando sin SSL..."
+        Set-ItemProperty "IIS:\Sites\Default Web Site" -Name Bindings -Value @{Protocol="http"; bindingInformation="*:${puerto}:"}
+    }
+
+    Restart-Service W3SVC
+    iisreset
+}
+
+# =====================================
+# Función para obtener versiones de Nginx disponibles
+# =====================================
+function Obtener-Versiones-Nginx {
+    return @("nginx-1.27.4.zip", "nginx-1.26.3.zip")
+}
+
+# =====================================
+# Función para obtener versiones de Apache disponibles
+# =====================================
+function Obtener-Versiones-Apache {
+    return @(
+       "httpd-2.4.63-250207-win64-VS17.zip",
+       "httpd-2.4.62-240101-win64-VS17.zip",
+       "httpd-2.4.61-231205-win64-VS17.zip"
+    )
+}
+
+# =====================================
+# Función para descargar archivos con manejo de redirección
+# =====================================
+function Descargar-Archivo {
+    param (
+        [string]$url,
+        [string]$outputPath
+    )
+
+    Write-Output "Descargando archivo desde: $url ..."
+    try {
+        Write-Host "Descargando con Invoke-WebRequest (puede tardar)..."
+        Invoke-WebRequest -Uri $url -OutFile $outputPath -ErrorAction Stop -Verbose
+        Write-Output "Descarga completada: $outputPath"
+    }
+    catch {
+        Write-Output "Error al descargar el archivo: $_"
+        return $false
+    }
+
+    if (!(Test-Path $outputPath)) {
+        Write-Output "Error: No se encontró el archivo en $outputPath tras la descarga."
+        return $false
+    }
+
+    $size = (Get-Item $outputPath).Length
+    Write-Host "Tamaño del archivo descargado: $size bytes."
+
+    if ($size -lt 1000000) {
+        Write-Host "El archivo es muy pequeño. Revisando si es HTML..."
+        $headLines = Get-Content $outputPath -Head 10
+        if ($headLines -match "<html" -or $headLines -match "<!DOCTYPE html") {
+            Write-Host "Error: El archivo parece ser HTML (posible error o redirección)."
+            return $false
+        } else {
+            Write-Host "El archivo es menor de 1 MB, pero no parece HTML. Continuando..."
+        }
+    }
+    return $true
+}
+
+# =====================================
+# Función para instalar VC++ Redistributable si falta VCRUNTIME140.dll
+# =====================================
+function Instalar-VC_Redist {
+    if ((Test-Path "C:\Windows\System32\VCRUNTIME140.dll") -or (Test-Path "C:\Windows\SysWOW64\VCRUNTIME140.dll")) {
+        Write-Output "VC++ Redistributable ya instalado."
+        return $true
+    } else {
+        Write-Output "VCRUNTIME140.dll no se encontró. Descargando e instalando VC++ Redistributable..."
+        $vcUrl = "https://aka.ms/vs/16/release/vc_redist.x64.exe"
+        $tempDir = "C:\temp"
+        if (!(Test-Path $tempDir)) {
+            New-Item -Path $tempDir -ItemType Directory | Out-Null
+        }
+        $vcInstaller = "$tempDir\vc_redist.x64.exe"
+        try {
+            Invoke-WebRequest -Uri $vcUrl -OutFile $vcInstaller -UseBasicParsing
+            Write-Output "Instalando VC++ Redistributable..."
+            Start-Process -FilePath $vcInstaller -ArgumentList "/install", "/quiet", "/norestart" -NoNewWindow -Wait
+            Start-Sleep -Seconds 10
+            Remove-Item $vcInstaller -Force
+            if ((Test-Path "C:\Windows\System32\VCRUNTIME140.dll") -or (Test-Path "C:\Windows\SysWOW64\VCRUNTIME140.dll")) {
+                Write-Output "VC++ Redistributable instalado correctamente."
+                return $true
+            } else {
+                Write-Output "Error: La instalación de VC++ Redistributable falló."
+                return $false
+            }
+        } catch {
+            Write-Output "Error al descargar o instalar VC++ Redistributable: $_"
+            return $false
+        }
+    }
+}
+
+function Install-Openssl {
+    $opensslPath = "C:\OpenSSL-Win64\bin"    
+    if (Test-Path $opensslPath) {
+        Write-Output "OpenSSL ya está instalado."
+    } else {
+        $Url = "https://slproweb.com/download/Win64OpenSSL-3_4_1.exe"
+        $instalacion = "$env:TEMP\OpenSSL_Installer.exe"
+        Write-Output "Descargando OpenSSL..."
+        Invoke-WebRequest -Uri $Url -OutFile $instalacion
+        Write-Output "Instalando OpenSSL..."
+        Start-Process -FilePath $instalacion -ArgumentList "/silent /verysilent /sp- /suppressmsgboxes /DIR=C:\OpenSSL-Win64" -Wait
+        if (-not ($env:Path -split ';' -contains $opensslPath)) {
+            [Environment]::SetEnvironmentVariable("Path", "$env:Path;$opensslPath", [EnvironmentVariableTarget]::Machine)
+            $env:Path += ";$opensslPath"
+        }
+        Write-Output "Verificando la instalación de OpenSSL..."
+        try {
+            if (-Not (Test-Path "$opensslPath\openssl.exe")) {
+                throw "El archivo OpenSSL.exe no se encontró en $opensslPath. La instalación puede haber fallado."
+            }
+            $opensslVersion = & "$opensslPath\openssl.exe" version 2>&1
+            if ($opensslVersion -match "error|failed|not recognized") {
+                throw "Error al ejecutar OpenSSL: $opensslVersion"
+            }
+            Write-Output "OpenSSL instalado correctamente. Versión: $opensslVersion"
+        } catch {
+            Write-Output "Error al verificar la instalación de OpenSSL: $_"
+        }
+        Remove-Item -Path $instalacion -Force
+    }
+}
+
+# =====================================
+# Función para instalar Nginx (puerto 8080 por defecto en modo HTTP)
+# =====================================
+function Instalar-Nginx {
+    $versiones = Obtener-Versiones-Nginx
+    Write-Output "Seleccione la versión de Nginx a instalar:"
+    for ($i = 0; $i -lt $versiones.Length; $i++) {
+        Write-Output "$($i+1). $($versiones[$i])"
+    }
+
+    while ($true) {
+        $seleccion = Read-Host "Ingrese el número de la versión"
+        if ($seleccion -match '^\d+$') {
+            $opcion = [int]$seleccion
+            if ($opcion -ge 1 -and $opcion -le $versiones.Length) {
+                Write-Output "La versión seleccionada es: $($versiones[$opcion - 1])"
+                break
+            }
+        }
+        Write-Output "Opción inválida. Por favor, ingrese un número entre 1 y $($versiones.Length)."
+    }
+
+    $nginxVersion = $versiones[$seleccion - 1]
+    $urlNginx = "https://nginx.org/download/$nginxVersion"
+    $zipPath = "C:\temp_download.zip"
+    $installBasePath = "C:\Nginx"
+    $tempExtractPath = "C:\temp_nginx"
+
+    # 1) Descarga
+    if (-not (Descargar-Archivo -url $urlNginx -outputPath $zipPath)) {
+        Write-Output "Falló la descarga. Cancelando instalación."
+        return
+    }
+    
+    # 2) Detener cualquier proceso Nginx previo
+    $nginxProc = Get-Process nginx -ErrorAction SilentlyContinue
+    if ($nginxProc) {
+        Write-Host "Deteniendo proceso Nginx en ejecución..."
+        $nginxProc | Stop-Process -Force
+    }
+
+    # 3) Eliminar carpeta de destino si existe
+    if (Test-Path $installBasePath) {
+        Write-Host "Eliminando carpeta $installBasePath para evitar conflicto..."
+        Remove-Item $installBasePath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # 4) Eliminar carpeta temporal si existe
+    if (Test-Path $tempExtractPath) {
+        Remove-Item $tempExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # 5) Extraer en carpeta temporal
+    Write-Output "Extrayendo archivos en $tempExtractPath ..."
+    Expand-Archive -Path $zipPath -DestinationPath $tempExtractPath -Force
+    Write-Output "Extracción completada."
+
+    $nginxExtractedFolder = Get-ChildItem -Path $tempExtractPath -Directory | Select-Object -First 1
+    if ($null -eq $nginxExtractedFolder) {
+        Write-Output "Error: No se encontró la carpeta extraída de Nginx."
+        return
+    }
+
+    # 6) Mover carpeta a destino
+    Move-Item -Path $nginxExtractedFolder.FullName -Destination $installBasePath -Force
+    Write-Output "Nginx se ha movido a: $installBasePath"
+    
+    # 7) Preguntar si se desea habilitar SSL
+    do {
+        $opcionSSL = Read-Host "¿Desea habilitar SSL en Nginx? (1 = Sí, 2 = No)"
+        if ($opcionSSL -eq "1" -or $opcionSSL -eq "2") {
+            break
+        } else {
+            Write-Output "Opción inválida. Intente de nuevo."
+        }
+    } while ($true)
+    $opssl = if ($opcionSSL -eq "1") { 1 } else { 0 }
+    
+    # 8) Configurar y arrancar
+    Configurar-Arrancar-Nginx -nginxPath $installBasePath -opssl $opssl
+}
+
+function Configurar-Arrancar-Nginx {
+    param (
+        [string]$nginxPath = "C:\Nginx",
+        [int]$opssl = 0
+    )
+    
+    if (-not (Instalar-VC_Redist)) {
+        Write-Host "No se pudo instalar VC++ Redistributable. Abortando la instalación."
+        return
+    }
+    
+    $nginxExe = Join-Path $nginxPath "nginx.exe"
+    $opensslExe = "C:\OpenSSL-Win64\bin\openssl.exe"
+    $configPath = Join-Path $nginxPath "conf\nginx.conf"
+    $nginxPort = $null
+
+    function Solicitar-Respuesta([string]$mensaje, [string]$patronValidacion) {
+        while ($true) {
+            $respuesta = Read-Host $mensaje
+            if ($respuesta -match $patronValidacion) {
+                return $respuesta
+            }
+            else {
+                Write-Host "Entrada inválida. Por favor intente nuevamente."
+            }
+        }
+    }
+    
+    # Asegurarnos de que la línea sea 'include mime.types;'
+    if (Test-Path $configPath) {
+        (Get-Content $configPath) -replace 'include\s+conf/mime.types;', 'include mime.types;' | Set-Content $configPath
+        (Get-Content $configPath) -replace 'include\s+mime.types;', 'include mime.types;' | Set-Content $configPath
+    }
+
+    # Crear carpeta logs si no existe
+    $logsFolder = Join-Path $nginxPath "logs"
+    if (-not (Test-Path $logsFolder)) {
+        New-Item -ItemType Directory -Path $logsFolder | Out-Null
+    }
+
+    if ((Test-Path $nginxExe) -and (Test-Path $opensslExe)) {
+        while ($true) {
+            Write-Host "Nginx y OpenSSL ya están instalados en sus rutas respectivas."
+            $respuesta = Solicitar-Respuesta "¿Desea modificar la configuración (cambiar puerto/protocolo) o reinstalar? (S/N)" "^[sSnN]$"
+            if ($respuesta -match "^[sS]$") {
+                $nginxPort = Obtener-PuertoValido -mensaje "Ingresa el puerto para la configuración de Nginx"
+                $protocolo = Solicitar-Respuesta "¿Desea configurar HTTP o SSL? (H/SSL)" "^(?i)(h|ssl)$"
+                if ($protocolo -match "^(?i)h$") {
+                    $opssl = 0
+                }
+                else {
+                    $opssl = 1
+                }
+                break
+            }
+            elseif ($respuesta -match "^[nN]$") {
+                Write-Host "No se realizará ningún cambio. Saliendo de la función."
+                return
+            }
+        }
+    }
+    else {
+        if (-not (Test-Path $configPath)) {
+            Write-Output "Advertencia: No se encontró nginx.conf en $nginxPath\conf"
+            return
+        }
+        $nginxPort = Obtener-PuertoValido -mensaje "Ingresa el puerto para la configuración de Nginx"
+    }
+    
+    if ($opssl -eq 0) {
+        # HTTP con puerto 8080 por defecto
+        if (-not $nginxPort) {
+            Write-Host "No se ingresó puerto; se usará 8080 por defecto para HTTP."
+            $nginxPort = 8080
+        }
+        (Get-Content $configPath) -replace 'listen\s+80;', "listen $nginxPort;" | Set-Content $configPath
+        Write-Output "Configurado Nginx para escuchar en el puerto $nginxPort (HTTP)"
+        
+        (Get-Content $configPath) -replace "#error_log\s+logs/error.log;", "error_log  logs/error.log;" | Set-Content $configPath
+        (Get-Content $configPath) -replace "#access_log\s+logs/access.log\s+main;", "access_log  logs/access.log;" | Set-Content $configPath
+        Write-Output "Configuración de logs aplicada."
+    }
+    else {
+        # SSL
+        if (-not $nginxPort) {
+            Write-Host "No se ingresó puerto SSL; ingresa un puerto distinto a 443 si no deseas conflicto."
+            $nginxPort = Obtener-PuertoValido -mensaje "Ingresa el puerto para la configuración SSL de Nginx"
+        }
+        $sslFolder = Join-Path $nginxPath "conf\ssl"
+        if (-not (Test-Path $sslFolder)) {
+            New-Item -ItemType Directory -Path $sslFolder | Out-Null
+        }
+        Write-Output "Generando certificado autofirmado para Nginx..."
+        $cert = New-SelfSignedCertificate -Subject "CN=localhost" `
+                    -CertStoreLocation Cert:\LocalMachine\My `
+                    -KeyExportPolicy Exportable -KeySpec Signature `
+                    -NotAfter (Get-Date).AddYears(1)
+        $certPassword = ConvertTo-SecureString -String "P@ssw0rd" -Force -AsPlainText
+        $certPath = Join-Path $sslFolder "localhost.pfx"
+        Export-PfxCertificate -Cert $cert -FilePath $certPath -Password $certPassword
+        
+        $certPem = Join-Path $sslFolder "localhost.crt"
+        $keyPem = Join-Path $sslFolder "localhost.key"
+
+        if (-not (Test-Path $opensslExe)) {
+            Write-Output "OpenSSL no se encontró en $opensslExe. Se intentará instalar..."
+            Install-Openssl
+            if (-not (Test-Path $opensslExe)) {
+                Write-Output "Error: No se encontró openssl.exe en $opensslExe. Verifica la instalación."
+                return
+            }
+        }
+        
+        Write-Output "Extrayendo certificado CRT..."
+        $resultadoCrt = & $opensslExe pkcs12 -in "$certPath" -out "$certPem" -nodes -nokeys -password pass:P@ssw0rd 2>&1
+        Write-Output $resultadoCrt
+        
+        Write-Output "Extrayendo clave privada KEY..."
+        $resultadoKey = & $opensslExe pkcs12 -in "$certPath" -out "$keyPem" -nodes -nocerts -password pass:P@ssw0rd 2>&1
+        Write-Output $resultadoKey
+        
+        if (!(Test-Path $certPem) -or !(Test-Path $keyPem)) {
+            Write-Output "Error: No se crearon los archivos CRT y KEY. Revisa la salida de OpenSSL."
+            return
+        }
+
+        # Cambiamos la referencia del bloque SSL para que el server normal escuche 8080
+        $nginxHttpsBlock = @"
+            # user  nobody;
+worker_processes  1;
+
+error_log  logs/error.log;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    access_log  logs/access.log;
+    sendfile        on;
+    keepalive_timeout  65;
+
+    server {
+        listen       8080;
+        server_name  localhost;
+
+        location / {
+            root   html;
+            index  index.html index.htm;
+        }
+
+        error_page   500 502 503 504  /50x.html;
+        location = /50x.html {
+            root   html;
+        }
+    }
+server {
+    listen       $nginxPort ssl;
+    server_name  localhost;
+
+    ssl_certificate      ssl/localhost.crt;
+    ssl_certificate_key  ssl/localhost.key;
+
+    ssl_session_cache    shared:SSL:1m;
+    ssl_session_timeout  5m;
+
+    ssl_ciphers  HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers  on;
+
+    location / {
+        root   html;
+        index  index.html index.htm;
+    }
+  }
+}
+"@
+        Set-Content -Path $configPath -Value $nginxHttpsBlock
+        Write-Output "nginx.conf sobrescrito con la configuración HTTPS."
+    }
+
+    Write-Output "Agregando regla de firewall para permitir conexiones en el puerto $nginxPort..."
+    New-NetFirewallRule -DisplayName "Permitir Nginx en el puerto $nginxPort" `
+                        -Direction Inbound -Action Allow -Protocol TCP -LocalPort $nginxPort `
+                        -ErrorAction SilentlyContinue
+    
+    if (-not (Test-Path $nginxExe)) {
+        Write-Output "Error: No se encontró nginx.exe en $nginxPath"
+        return
+    }
+
+    Write-Output "Iniciando Nginx desde: $nginxExe"
+    Start-Process -FilePath $nginxExe -WorkingDirectory $nginxPath -NoNewWindow
+    Set-NetFirewallRule -DisplayName "Permitir Nginx*" -Enabled True
+    Write-Output "Nginx se está ejecutando correctamente."
+}
+
+# =====================================
+# Función para instalar Apache
+# =====================================
+function Instalar-Apache {
+    $versiones = Obtener-Versiones-Apache
+    Write-Output "Seleccione la versión de Apache a instalar:"
+    for ($i = 0; $i -lt $versiones.Length; $i++) {
+        Write-Output "$($i+1). $($versiones[$i])"
+    }
+
+    while ($true) {
+        $seleccion = Read-Host "Ingrese el número correspondiente a la versión (1-$($versiones.Length))"
+        if ($seleccion -match '^\d+$') {
+            $opcion = [int]$seleccion
+            if ($opcion -ge 1 -and $opcion -le $versiones.Length) {
+                Write-Output "La versión seleccionada es: $($versiones[$opcion - 1])"
+                break
+            }
+        }
+        Write-Output "Entrada inválida. Por favor, ingrese un número entre 1 y $($versiones.Length)."
+    }
+
+    $apacheVersion = $versiones[$seleccion - 1]
+    $urlApache = "https://www.apachelounge.com/download/VS17/binaries/$apacheVersion"
+    $zipPath = "C:\temp_download.zip"
+    $apacheInstallPath = "C:\Apache24"
+    $tempExtractPath = "C:\ApacheTemp"
+
+    if (-not (Descargar-Archivo -url $urlApache -outputPath $zipPath)) {
+        Write-Output "Falló la descarga. Cancelando instalación."
+        return
+    }
+    
+    Write-Output "Extrayendo archivos a $apacheInstallPath ..."
+    if (Test-Path $tempExtractPath) {
+        Remove-Item $tempExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Expand-Archive -Path $zipPath -DestinationPath $tempExtractPath -Force
+    try {
+        if (Test-Path "$tempExtractPath\Apache24") {
+            Move-Item -Path "$tempExtractPath\Apache24\*" -Destination $apacheInstallPath -Force
+        }
+        else {
+            Move-Item -Path "$tempExtractPath\*" -Destination $apacheInstallPath -Force
+        }
+        Remove-Item -Path $tempExtractPath -Recurse -Force
+        Write-Output "Extracción completada y archivos movidos correctamente."
+    } catch {
+        Write-Output "Error al extraer o mover el archivo: $_"
+        return
+    }
+
+    Write-Output "Apache instalado en $apacheInstallPath"
+    Configurar-Arrancar-Apache -apachePath $apacheInstallPath
+}
+
+function Configurar-Arrancar-Apache {
+    param (
+        [string]$apachePath = "C:\Apache24"
+    )
+
+    if (-not (Instalar-VC_Redist)) {
+        Write-Host "No se pudo instalar VC++ Redistributable. Abortando la instalación de Apache."
+        return
+    }
+
+    $apacheService = Get-Service -Name "Apache24" -ErrorAction SilentlyContinue
+
+    if ($apacheService) {
+        Write-Host "Apache ya está instalado."
+        do {
+            Write-Host "¿Deseas cambiar el puerto del Apache?"
+            Write-Host "1 - SI"
+            Write-Host "2 - NO"
+            Write-Host "================================================="
+            $opc2 = Read-Host "Selecciona una opción"
+            switch ($opc2) {
+                "1" {
+                    $puerto = Obtener-PuertoValido -mensaje "Ingresa el puerto para la configuración de Apache"
+                    $opssl = Read-Host "¿Deseas habilitar SSL en Apache? (Ingresa 1 para Sí, cualquier otro valor para HTTP)"
+                    
+                    $config = Join-Path $apachePath "conf\httpd.conf"
+                    if (-not (Test-Path $config)) {
+                        Write-Host "No se encontró el archivo httpd.conf en $config. Abortando."
+                        return
+                    }
+
+                    if ($opssl -eq "1") {
+                        (Get-Content $config) -replace "Listen \d+", "Listen $puerto" | Set-Content $config
+                        (Get-Content $config) -replace '#Include conf/extra/httpd-ssl.conf', "Include conf/extra/httpd-ssl.conf" | Set-Content $config
+                        (Get-Content $config) -replace '#LoadModule ssl_module modules/mod_ssl.so', "LoadModule ssl_module modules/mod_ssl.so" | Set-Content $config
+                        (Get-Content $config) -replace '#LoadModule socache_shmcb_module modules/mod_socache_shmcb.so', "LoadModule socache_shmcb_module modules/mod_socache_shmcb.so" | Set-Content $config
+                        (Get-Content $config) -replace '#LoadModule headers_module modules/mod_headers.so', "LoadModule headers_module modules/mod_headers.so" | Set-Content $config
+
+                        $opensslPath = Join-Path $apachePath "openssl.exe"
+                        if (Test-Path $opensslPath) {
+                            & $opensslPath req -x509 -nodes -days 365 -newkey rsa:2048 `
+                                -keyout (Join-Path $apachePath "conf\server.key") `
+                                -out (Join-Path $apachePath "conf\server.crt") `
+                                -subj "/C=MX/ST=Sinaloa/L=LosMochis/O=??/OU=??/CN=localhost" 2>&1 | Out-Null
+                        }
+                        else {
+                            Write-Host "No se encontró OpenSSL en $opensslPath. Asegúrate de que esté instalado."
+                            return
+                        }
+                        $sslconf = Join-Path $apachePath "conf\extra\httpd-ssl.conf"
+                        (Get-Content $sslconf) -replace "ServerName www.example.com:\d+", "ServerName localhost:$puerto" | Set-Content $sslconf
+
+                        $sslconfContent = Get-Content $sslconf | ForEach-Object {
+                            if ($_ -match "^\s*Listen\s+\d+") {
+                                "# $_"
+                            }
+                            else {
+                                $_
+                            }
+                        }
+                        $sslconfContent | Set-Content $sslconf
+                        (Get-Content $sslconf) -replace "<VirtualHost _default_:\d+>", "<VirtualHost _default_:$puerto>" | Set-Content $sslconf
+
+                        Write-Host "Configuración SSL actualizada con el puerto $puerto."
+                    }
+                    else {
+                        (Get-Content $config) -replace "Listen \d+", "Listen $puerto" | Set-Content $config
+                        Write-Host "Configuración HTTP actualizada con el puerto $puerto."
+                    }
+
+                    Restart-Service -Name "Apache24"
+                    Write-Host "Apache ha sido reiniciado para aplicar los cambios."
+                    break
+                }
+                "2" {
+                    Write-Host "Saliendo sin realizar cambios."
+                    break
+                }
+                default {
+                    Write-Host "Opción no válida. Inténtalo de nuevo."
+                }
+            }
+        } while ($opc2 -ne "1" -and $opc2 -ne "2")
+    }
+    else {
+        Write-Host "Apache no está instalado. Procediendo a la instalación."
+
+        $puerto = Obtener-PuertoValido -mensaje "Ingresa el puerto para la configuración de Apache"
+        $opssl = Read-Host "¿Deseas habilitar SSL en Apache? (Ingresa 1 para Sí, cualquier otro valor para HTTP)"
+
+        $config = Join-Path $apachePath "conf\httpd.conf"
+        if (-not (Test-Path $config)) {
+            Write-Host "No se encontró el archivo httpd.conf en $config. Abortando la instalación."
+            return
+        }
+
+        if ($opssl -eq "1") {
+            (Get-Content $config) -replace "Listen \d+", "Listen $puerto" | Set-Content $config
+            New-NetFirewallRule -DisplayName "HTTP puerto $puerto" -Direction Inbound -Protocol TCP -LocalPort $puerto -Action allow | Out-Null
+            (Get-Content $config) -replace '#Include conf/extra/httpd-ssl.conf', "Include conf/extra/httpd-ssl.conf" | Set-Content $config
+            (Get-Content $config) -replace '#LoadModule ssl_module modules/mod_ssl.so', "LoadModule ssl_module modules/mod_ssl.so" | Set-Content $config
+            (Get-Content $config) -replace '#LoadModule socache_shmcb_module modules/mod_socache_shmcb.so', "LoadModule socache_shmcb_module modules/mod_socache_shmcb.so" | Set-Content $config
+            (Get-Content $config) -replace '#LoadModule headers_module modules/mod_headers.so', "LoadModule headers_module modules/mod_headers.so" | Set-Content $config
+
+            $opensslPath = Join-Path $apachePath "openssl.exe"
+            if (Test-Path $opensslPath) {
+                & $opensslPath req -x509 -nodes -days 365 -newkey rsa:2048 `
+                    -keyout (Join-Path $apachePath "conf\server.key") `
+                    -out (Join-Path $apachePath "conf\server.crt") `
+                    -subj "/C=MX/ST=Sinaloa/L=LosMochis/O=??/OU=??/CN=localhost" 2>&1 | Out-Null
+            }
+            else {
+                Write-Host "No se encontró OpenSSL en $opensslPath. Asegúrate de que esté instalado."
+                return
+            }
+            $sslconf = Join-Path $apachePath "conf\extra\httpd-ssl.conf"
+            (Get-Content $sslconf) -replace "ServerName www.example.com:\d+", "ServerName localhost:$puerto" | Set-Content $sslconf
+
+            $sslconfContent = Get-Content $sslconf | ForEach-Object {
+                if ($_ -match "^\s*Listen\s+\d+") {
+                    "# $_"
+                }
+                else {
+                    $_
+                }
+            }
+            $sslconfContent | Set-Content $sslconf
+            (Get-Content $sslconf) -replace "<VirtualHost _default_:\d+>", "<VirtualHost _default_:$puerto>" | Set-Content $sslconf
+
+            Write-Host "Configuración SSL aplicada con el puerto $puerto."
+        }
+        else {
+            (Get-Content $config) -replace "Listen \d+", "Listen $puerto" | Set-Content $config
+            Write-Host "Configuración HTTP aplicada con el puerto $puerto."
+        }
+
+        $apacheexe = Join-Path $apachePath "httpd.exe"
+        if (Test-Path $apacheexe) {
+            Write-Host "Instalando Apache desde $apacheexe"
+            Start-Process -FilePath $apacheexe -ArgumentList '-k', 'install', '-n', 'Apache24' -NoNewWindow -Wait
+            Write-Host "Iniciando Apache"
+            Start-Service -Name "Apache24"
+            Write-Host "Apache instalado y ejecutándose en el puerto $puerto"
+        }
+        else {
+            Write-Host "No se encontró httpd.exe en $apachePath"
+        }
+    }
+}
+
+# =====================================
+# Función para configurar reglas de firewall automáticamente en el rango 1-65500
+# =====================================
+function Configurar-Firewall {
+    Write-Output "Configurando reglas de firewall para permitir puertos del 1 al 65500..."
+    New-NetFirewallRule -DisplayName "Permitir todos los puertos TCP (1-65500)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1-65500 -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName "Permitir todos los puertos UDP (1-65500)" -Direction Inbound -Action Allow -Protocol UDP -LocalPort 1-65500 -ErrorAction SilentlyContinue
+    Write-Output "Reglas de firewall configuradas exitosamente para los puertos del 1 al 65500."
+}
+
+# =====================================
+# Menú de selección con bucle do-while
+# =====================================
+function MenuInstalacionWeb {
+    do {
+        Write-Output "`nSeleccione el servicio a instalar (Web):"
+        Write-Output "1. IIS"
+        Write-Output "2. Nginx"
+        Write-Output "3. Apache"
+        Write-Output "4. Salir"
+        $opcion = Read-Host "Ingrese el número de la opción"
+    
+        switch ($opcion) {
+            "1" { Instalar-IIS; Configurar-IIS; Configurar-Firewall }
+            "2" { Instalar-Nginx; Configurar-Firewall }
+            "3" { Instalar-Apache; Configurar-Firewall }
+            "4" { Write-Output "Saliendo del instalador Web." }
+            default { Write-Output "Opción inválida. Intente de nuevo." }
+        }
+    } while ($opcion -ne "4")
+}
