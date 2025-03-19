@@ -1,0 +1,41 @@
+# MenuMaestro.ps1
+
+# Asegúrate de que "InstalacionFTP.ps1" y "InstalacionWeb.ps1" 
+# estén en la misma carpeta que este script o ajusta las rutas.
+
+. .\InstalacionFTP.ps1
+. .\InstalacionWeb.ps1
+
+do {
+    Clear-Host
+    Write-Host "====================================="
+    Write-Host "         MENÚ DE INSTALACIÓN         "
+    Write-Host "====================================="
+    Write-Host "1. Instalación por medio de FTP"
+    Write-Host "2. Instalación Web (descarga desde Internet)"
+    Write-Host "3. Salir"
+
+    $opcion = Read-Host "Seleccione una opción (1, 2 o 3)"
+
+    switch ($opcion) {
+        "1" {
+            # Llama a la función que vive en InstalacionFTP.ps1
+            # Asegúrate de que la función en ese archivo se llame exactamente "Mostrar-MenuPrincipal"
+            Mostrar-MenuPrincipal
+        }
+        "2" {
+            # Llama a la función que vive en InstalacionWeb.ps1
+            # Asegúrate de que la función en ese archivo se llame exactamente "MenuInstalacionWeb"
+            MenuInstalacionWeb
+        }
+        "3" {
+            Write-Host "Saliendo del menú maestro..."
+        }
+        default {
+            Write-Host "Opción inválida. Intente de nuevo."
+        }
+    }
+    
+    Write-Host "Presione Enter para continuar..."
+    Read-Host
+} while ($opcion -ne "3")
